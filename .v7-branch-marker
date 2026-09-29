@@ -1,0 +1,4 @@
+# v7.9.45 (rollback point)
+
+This branch tracks tag `v7.9.45` — the version running in production as nosflare-0xserverless.
+See branch `v7-hotfix` for the alarm/hibernation fix on top of this.
