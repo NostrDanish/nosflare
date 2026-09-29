@@ -1,0 +1,33 @@
+diff --git a/src/types.ts b/src/types.ts
+--- a/src/types.ts
++++ b/src/types.ts
+@@ RelayInfo interface
+   icon: string;
++  banner?: string;
+   limitation?: {
+
+diff --git a/tsconfig.json b/tsconfig.json
+--- a/tsconfig.json
++++ b/tsconfig.json
+-    "moduleResolution": "node",
++    "moduleResolution": "bundler",
+
+diff --git a/wrangler.toml b/wrangler.toml
+--- a/wrangler.toml
++++ b/wrangler.toml
+@@ staging deploy settings
+-name = "nosflare"
++name = "nosflare-0xserverless-v8"
+@@ R2 disabled until enabled in dashboard
+-[[r2_buckets]]
+-binding = "NOSTR_ARCHIVE"
+-bucket_name = "nostr-archive"
++# [[r2_buckets]]
++# binding = "NOSTR_ARCHIVE"
++# bucket_name = "nostr-archive"
+@@ observability
+-[observability.logs]
+-enabled = false
++[observability.logs]
++enabled = true
++head_sampling_rate = 1
