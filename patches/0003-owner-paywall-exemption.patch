@@ -1,0 +1,22 @@
+diff --git a/src/config.ts b/src/config.ts
+--- a/src/config.ts
++++ b/src/config.ts
+@@ before PUBKEY_RATE_LIMIT
++// Owner pubkeys: exempt from paywall (v8 payments live in PaymentDO, not D1)
++export const OWNER_PUBKEYS = new Set<string>([
++  "c45041618951bb6012ac23f5cdf3d740465f2d640be841fd9bb1d0733370cd3c" // 0xPrivacy
++]);
++
+ export const PUBKEY_RATE_LIMIT = { rate: 600 / 60000, capacity: 600 };
+
+diff --git a/src/connection-do.ts b/src/connection-do.ts
+--- a/src/connection-do.ts
++++ b/src/connection-do.ts
+@@ import block from './config'
+   AUTH_REQUIRED,
++  OWNER_PUBKEYS
+ } from './config';
+@@ payment gate (~line 635)
+-      if (PAY_TO_RELAY_ENABLED) {
++      if (PAY_TO_RELAY_ENABLED && !OWNER_PUBKEYS.has(event.pubkey)) {
+         let hasPaid = await this.getCachedPaymentStatus(event.pubkey);
