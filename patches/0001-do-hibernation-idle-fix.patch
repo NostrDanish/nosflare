@@ -1,0 +1,57 @@
+diff --git a/src/durable-object.ts b/src/durable-object.ts
+index a7ee949..70e9cfa 100644
+--- a/src/durable-object.ts
++++ b/src/durable-object.ts
+@@ -129,7 +129,16 @@ export class RelayWebSocket implements DurableObject {
+       return;
+     }
+ 
+-    // If still active, schedule next cleanup check
++    // If connections exist but nothing has published within the idle window,
++    // clean up caches and let the DO hibernate without rescheduling.
++    // Subscriptions persist in storage; webSocketMessage wakes the DO on demand.
++    if (idleTime >= this.IDLE_TIMEOUT) {
++      console.log(`DO ${this.doName} idle beyond timeout with ${activeCount} hibernated socket(s) - sleeping`);
++      await this.cleanup();
++      return;
++    }
++
++    // Genuine recent activity: schedule next cleanup check
+     const nextAlarm = now + this.IDLE_TIMEOUT;
+     await this.state.storage.setAlarm(nextAlarm);
+     console.log(`Next alarm scheduled for DO ${this.doName} in ${this.IDLE_TIMEOUT}ms`);
+@@ -579,8 +588,7 @@ export class RelayWebSocket implements DurableObject {
+ 
+   // WebSocket Hibernation API handler methods
+   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
+-    // Track activity
+-    this.lastActivityTime = Date.now();
++    // Activity is only tracked for EVENT messages below, after parsing.
+ 
+     const attachment = ws.deserializeAttachment() as SessionAttachment | null;
+     if (!attachment) {
+@@ -637,6 +645,11 @@ export class RelayWebSocket implements DurableObject {
+         parsedMessage = JSON.parse(text);
+       }
+ 
++      // Only real publishes count as activity for idle-alarm purposes
++      if (Array.isArray(parsedMessage) && parsedMessage[0] === 'EVENT') {
++        this.lastActivityTime = Date.now();
++      }
++
+       await this.handleMessage(session, parsedMessage);
+ 
+       // Update attachment with latest session state (including NIP-42 auth)
+diff --git a/tsconfig.json b/tsconfig.json
+index 4e3aeb1..7a150fd 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -4,7 +4,7 @@
+     "module": "ESNext",
+     "lib": ["ES2020"],
+     "types": ["@cloudflare/workers-types"],
+-    "moduleResolution": "node",
++    "moduleResolution": "bundler",
+     "strict": true,
+     "esModuleInterop": true,
+     "skipLibCheck": true,
