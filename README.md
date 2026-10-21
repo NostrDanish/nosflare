@@ -94,7 +94,7 @@ You can deploy Nosflare using either the Wrangler CLI or directly through the Cl
 
 Nosflare typically costs **75-90% less** than traditional relay hosting while providing **better performance**, **global scale**, and **zero maintenance**.
 
-View detailed pricing → [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [Durable Objects](https://developers.cloudflare.com/durable-objects/platform/pricing/), [D1 database](https://developers.cloudflare.com/d1/platform/pricing/)
+View detailed pricing → [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [Durable Objects](https://developers.cloudflare.com/durable-objects/pricing/), [D1 database](https://developers.cloudflare.com/d1/platform/pricing/)
 
 ## Pay To Relay
 
@@ -105,6 +105,7 @@ Nosflare allows for "pay to relay", which lets the relay operator accept Bitcoin
 Payments are only recorded from a cryptographically verified [NIP-57](https://github.com/nostr-protocol/nips/blob/master/57.md) zap receipt. The payment notification endpoint (`POST /?notify-zap`) requires a JSON body of the form `{ "event": { ... } }` where `event` is a kind `9735` zap receipt that:
 
 - has a valid Schnorr signature;
+- is signed by the operator's LNURL server: the receipt's pubkey must equal the LNURL server's `nostrPubkey` — either configured directly via `LNURL_SERVER_PUBKEY` (hex, preferred, no network lookup) or resolved from `PAYEE_LUD16` (`name@domain`) via `https://<domain>/.well-known/lnurlp/<name>` (cached for 1 hour; resolution failures reject the receipt). This binds receipts to the operator's LNURL server, so a self-signed forged receipt is rejected even if it has a valid signature;
 - is addressed to the relay operator (`p` tag must match the hex pubkey of the configured `relayNpub`);
 - identifies the payer in its `P` tag (this pubkey receives relay access);
 - includes the paid `bolt11` invoice and an `amount` (in millisatoshis) of at least `RELAY_ACCESS_PRICE_SATS`;
