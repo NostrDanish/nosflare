@@ -381,7 +381,7 @@ async function hasPaidForRelay(pubkey: string, env: Env): Promise<boolean | null
   }
 }
 
-async function savePaidPubkey(pubkey: string, env: Env): Promise<boolean> {
+async function savePaidPubkey(pubkey: string, env: Env, amountSats: number = RELAY_ACCESS_PRICE_SATS): Promise<boolean> {
   try {
     const session = env.RELAY_DATABASE.withSession('first-primary');
     await session.prepare(`
@@ -390,11 +390,146 @@ async function savePaidPubkey(pubkey: string, env: Env): Promise<boolean> {
       ON CONFLICT(pubkey) DO UPDATE SET
         paid_at = excluded.paid_at,
         amount_sats = excluded.amount_sats
-    `).bind(pubkey, Math.floor(Date.now() / 1000), RELAY_ACCESS_PRICE_SATS).run();
+    `).bind(pubkey, Math.floor(Date.now() / 1000), amountSats).run();
     return true;
   } catch (error) {
     console.error(`Error saving paid pubkey ${pubkey}:`, error);
     return false;
+  }
+}
+
+// Zap receipt (NIP-57 kind 9735) verification for pay-to-relay.
+// A payment is recorded only from a structurally and cryptographically valid
+// zap receipt issued by the operator's LNURL server after invoice settlement:
+//   - kind 9735 with a valid Schnorr signature;
+//   - `p` tag = the relay operator's pubkey (relayNpub);
+//   - `P` tag = the payer (this pubkey receives access);
+//   - `bolt11` tag present (the paid invoice) and `amount` (msats) >= price;
+//   - receipt not absurdly old (replay hygiene).
+const MAX_RECEIPT_AGE_SECONDS = 30 * 24 * 3600; // 30 days
+
+interface VerifiedPayment {
+  payer: string;      // payer pubkey (zap sender, `P` tag) that gets relay access
+  amountSats: number; // paid amount in sats
+  receiptId: string;  // zap receipt event id (audit trail)
+  bolt11: string;     // the paid invoice (audit trail)
+}
+
+async function verifyZapReceipt(event: NostrEvent, operatorNpub: string, priceSats: number): Promise<VerifiedPayment | null> {
+  try {
+    if (!event || event.kind !== 9735) return null;
+
+    const operatorHex = npubToHex(operatorNpub);
+    if (!operatorHex) {
+      console.error("Configured relayNpub is not a valid npub");
+      return null;
+    }
+
+    const tags = event.tags ?? [];
+    const tag = (name: string) => tags.find((t) => t[0] === name && t[1])?.[1];
+
+    // Recipient must be the relay operator; sender (P) is the payer.
+    if (tag("p") !== operatorHex) return null;
+    const payer = tag("P");
+    if (!payer || !/^[0-9a-f]{64}$/.test(payer)) return null;
+
+    // Amount (msats) must cover the configured price.
+    const amountTag = tag("amount");
+    const amountMsats = amountTag ? Number.parseInt(amountTag, 10) : NaN;
+    if (!Number.isFinite(amountMsats) || amountMsats < priceSats * 1000) return null;
+
+    // The paid invoice must be attached.
+    const bolt11 = tag("bolt11");
+    if (!bolt11 || !bolt11.toLowerCase().startsWith("ln")) return null;
+
+    // Receipt freshness.
+    const now = Math.floor(Date.now() / 1000);
+    if (event.created_at > now + 900 || event.created_at < now - MAX_RECEIPT_AGE_SECONDS) return null;
+
+    if (!(await verifyEventSignature(event))) return null;
+
+    return {
+      payer,
+      amountSats: Math.floor(amountMsats / 1000),
+      receiptId: event.id,
+      bolt11,
+    };
+  } catch (error) {
+    console.error("Zap receipt verification failed:", error);
+    return null;
+  }
+}
+
+// Minimal bech32 (BIP-173) decode for `npub` -> hex pubkey. Only what the
+// payment path needs: parse the operator's configured npub to the 32-byte hex
+// pubkey compared against zap receipt `p` tags.
+const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+function bech32Polymod(values: number[]): number {
+  const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let chk = 1;
+  for (const v of values) {
+    const top = chk >> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ v;
+    for (let i = 0; i < 5; i++) {
+      if ((top >> i) & 1) chk ^= GEN[i];
+    }
+  }
+  return chk;
+}
+
+function bech32HrpExpand(hrp: string): number[] {
+  return [...hrp].map((c) => c.charCodeAt(0) >> 5)
+    .concat([0], [...hrp].map((c) => c.charCodeAt(0) & 31));
+}
+
+function bech32ConvertBits(data: number[], fromBits: number, toBits: number, pad: boolean): number[] | null {
+  let acc = 0;
+  let bits = 0;
+  const ret: number[] = [];
+  const maxv = (1 << toBits) - 1;
+  for (const value of data) {
+    if (value < 0 || value >> fromBits !== 0) return null;
+    acc = (acc << fromBits) | value;
+    bits += fromBits;
+    while (bits >= toBits) {
+      bits -= toBits;
+      ret.push((acc >> bits) & maxv);
+    }
+  }
+  if (pad) {
+    if (bits > 0) ret.push((acc << (toBits - bits)) & maxv);
+  } else if (bits >= fromBits || ((acc << (toBits - bits)) & maxv) !== 0) {
+    return null;
+  }
+  return ret;
+}
+
+// Decode a NIP-19 npub to a lowercase hex pubkey. Returns null for anything
+// malformed or not an npub.
+function npubToHex(npub: string): string | null {
+  try {
+    const value = String(npub).trim().toLowerCase();
+    const split = value.lastIndexOf("1");
+    if (split < 1 || split + 7 > value.length) return null;
+    const hrp = value.slice(0, split);
+    if (hrp !== "npub") return null;
+
+    const data: number[] = [];
+    for (const c of value.slice(split + 1)) {
+      const d = BECH32_CHARSET.indexOf(c);
+      if (d === -1) return null;
+      data.push(d);
+    }
+    if (data.length < 6) return null;
+    if (bech32Polymod(bech32HrpExpand(hrp).concat(data)) !== 1) return null;
+
+    const words = bech32ConvertBits(data.slice(0, -6), 5, 8, false);
+    if (!words || words.length !== 32) return null;
+
+    return words.map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
   }
 }
 
@@ -524,7 +659,7 @@ async function validateNIP05FromKind0(pubkey: string, env: Env): Promise<boolean
     return isValid;
 
   } catch (error) {
-    console.error(`Error validating NIP-05 for pubkey ${pubkey}: ${error}`);
+    console.error(`Error validating NIP-05 for pubkey: ${error}`);
     return false;
   }
 }
@@ -1644,931 +1779,4 @@ async function queryEvents(filters: NostrFilter[], bookmark: string, env: Env): 
         if (hasTagFilters) {
           const countQuery = buildCountQuery(filter);
           const countResult = await session.prepare(countQuery.sql).bind(...countQuery.params).first() as { count: number } | null;
-          const estimatedRows = (countResult?.count as number) || 0;
-
-          if (estimatedRows > 10000) {
-            console.warn(`Query precheck: estimated ${estimatedRows} rows, skipping filter to prevent timeout`);
-            continue;
-          } else {
-            console.log(`Query precheck: estimated ${estimatedRows} rows, proceeding`);
-          }
-        }
-
-        validFilters.push(filter);
-      }
-
-      if (validFilters.length === 0) {
-        console.warn('All filters were too expensive after COUNT precheck');
-      } else {
-        const queries = validFilters.map(filter => {
-          const query = buildQuery(filter);
-          return session.prepare(query.sql).bind(...query.params);
-        });
-
-        try {
-          const results = await session.batch(queries);
-
-          // Collect all rows first
-          const allRows: any[] = [];
-
-          // Process all batch results
-          for (let i = 0; i < results.length; i++) {
-            const result = results[i];
-
-            // Log query metadata for first result
-            if (i === 0 && result.meta) {
-              console.log({
-                servedByRegion: result.meta.served_by_region ?? "",
-                servedByPrimary: result.meta.served_by_primary ?? false,
-                batchSize: results.length
-              });
-            }
-
-            if (result.success && result.results) {
-              for (const row of result.results as any[]) {
-                if (totalEventsRead >= GLOBAL_MAX_EVENTS) break;
-                allRows.push(row);
-                totalEventsRead++;
-              }
-            } else if (!result.success) {
-              console.error(`Batch query ${i} failed:`, result.error);
-            }
-          }
-
-          // Build events from collected rows
-          for (const row of allRows) {
-            const event: NostrEvent = {
-              id: row.id as string,
-              pubkey: row.pubkey as string,
-              created_at: row.created_at as number,
-              kind: row.kind as number,
-              tags: JSON.parse(row.tags as string),
-              content: row.content as string,
-              sig: row.sig as string
-            };
-            eventSet.set(event.id, event);
-          }
-        } catch (error: any) {
-          console.error(`Batch query execution error: ${error.message}`);
-          throw error;
-        }
-      }
-    }
-
-    const events = Array.from(eventSet.values()).sort((a, b) => {
-      if (b.created_at !== a.created_at) {
-        return b.created_at - a.created_at;
-      }
-      return a.id.localeCompare(b.id);
-    });
-
-    const newBookmark = session.getBookmark();
-    console.log(`Found ${events.length} events. New bookmark: ${newBookmark}`);
-    return { events, bookmark: newBookmark };
-
-  } catch (error: any) {
-    console.error(`Error querying events: ${error.message}`);
-    return { events: [], bookmark: null };
-  }
-}
-
-function handleRelayInfoRequest(request: Request): Response {
-  const responseInfo = { ...relayInfo };
-
-  if (PAY_TO_RELAY_ENABLED) {
-    const url = new URL(request.url);
-    responseInfo.payments_url = `${url.protocol}//${url.host}`;
-    responseInfo.fees = {
-      admission: [{ amount: RELAY_ACCESS_PRICE_SATS * 1000, unit: "msats" }]
-    };
-  }
-
-  return new Response(JSON.stringify(responseInfo), {
-    status: 200,
-    headers: {
-      "Content-Type": "application/nostr+json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type, Accept",
-      "Access-Control-Allow-Methods": "GET",
-    }
-  });
-}
-
-function serveLandingPage(): Response {
-  const payToRelaySection = PAY_TO_RELAY_ENABLED ? `
-    <div class="pay-section" id="paySection">
-      <p style="margin-bottom: 1rem;">Pay to access this relay:</p>
-      <button id="payButton" class="pay-button" data-npub="${relayNpub}" data-relays="wss://relay.damus.io,wss://relay.primal.net,wss://sendit.nosflare.com" data-sats-amount="${RELAY_ACCESS_PRICE_SATS}">
-        <img src="https://nosflare.com/images/pwb-button-min.png" alt="Pay with Bitcoin" style="height: 60px;">
-      </button>
-      <p class="price-info">${RELAY_ACCESS_PRICE_SATS.toLocaleString()} sats</p>
-    </div>
-    <div class="info-box" id="accessSection" style="display: none;">
-      <p style="margin-bottom: 1rem;">Connect your Nostr client to:</p>
-      <div class="url-display" onclick="copyToClipboard()" id="relay-url">
-        <!-- URL will be inserted by JavaScript -->
-      </div>
-      <p class="copy-hint">Click to copy</p>
-    </div>
-  ` : `
-    <div class="info-box">
-      <p style="margin-bottom: 1rem;">Connect your Nostr client to:</p>
-      <div class="url-display" onclick="copyToClipboard()" id="relay-url">
-        <!-- URL will be inserted by JavaScript -->
-      </div>
-      <p class="copy-hint">Click to copy</p>
-    </div>
-  `;
-
-  const html = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="A serverless Nostr relay through Cloudflare Worker and D1 database" />
-    <title>Nosflare - Nostr Relay</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background-color: #0a0a0a;
-            color: #ffffff;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            position: relative;
-            overflow: hidden;
-        }
-        
-        body::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: radial-gradient(circle at 20% 50%, rgba(255, 69, 0, 0.1) 0%, transparent 50%),
-                        radial-gradient(circle at 80% 50%, rgba(255, 140, 0, 0.1) 0%, transparent 50%),
-                        radial-gradient(circle at 50% 100%, rgba(255, 0, 0, 0.05) 0%, transparent 50%);
-            animation: pulse 10s ease-in-out infinite;
-            z-index: -1;
-        }
-        
-        @keyframes pulse {
-            0%, 100% { opacity: 0.7; }
-            50% { opacity: 1; }
-        }
-        
-        .container {
-            text-align: center;
-            padding: 2rem;
-            max-width: 600px;
-            z-index: 1;
-        }
-        
-        .logo {
-            width: 400px;
-            height: auto;
-            filter: drop-shadow(0 0 30px rgba(255, 69, 0, 0.5));
-        }
-        
-        .tagline {
-            font-size: 1.2rem;
-            color: #999;
-            margin-bottom: 3rem;
-        }
-        
-        .info-box, .pay-section {
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 12px;
-            padding: 2rem;
-            margin-bottom: 2rem;
-            backdrop-filter: blur(10px);
-        }
-        
-        .pay-button {
-            background: none;
-            border: none;
-            cursor: pointer;
-            padding: 0;
-            margin: 1rem 0;
-            transition: transform 0.3s ease;
-        }
-        
-        .pay-button:hover {
-            transform: scale(1.05);
-        }
-        
-        .price-info {
-            font-size: 1.2rem;
-            color: #ff8c00;
-            font-weight: 600;
-        }
-        
-        .url-display {
-            background: rgba(0, 0, 0, 0.5);
-            border: 1px solid rgba(255, 69, 0, 0.3);
-            border-radius: 8px;
-            padding: 1rem;
-            font-family: 'Courier New', monospace;
-            font-size: 1.1rem;
-            color: #ff8c00;
-            margin: 1rem 0;
-            word-break: break-all;
-            cursor: pointer;
-            transition: all 0.3s ease;
-        }
-        
-        .url-display:hover {
-            border-color: #ff4500;
-            background: rgba(255, 69, 0, 0.1);
-        }
-        
-        .copy-hint {
-            font-size: 0.9rem;
-            color: #666;
-            margin-top: 0.5rem;
-        }
-        
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 1rem;
-            margin-top: 2rem;
-        }
-        
-        .stat-item {
-            background: rgba(255, 255, 255, 0.02);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 8px;
-            padding: 1rem;
-        }
-        
-        .stat-value {
-            font-size: 1.5rem;
-            font-weight: 700;
-            color: #ff4500;
-        }
-        
-        .stat-label {
-            font-size: 0.9rem;
-            color: #999;
-            margin-top: 0.25rem;
-        }
-        
-        .links {
-            margin-top: 3rem;
-            display: flex;
-            gap: 2rem;
-            justify-content: center;
-            flex-wrap: wrap;
-        }
-        
-        .link {
-            color: #ff8c00;
-            text-decoration: none;
-            font-size: 1rem;
-            transition: color 0.3s ease;
-        }
-        
-        .link:hover {
-            color: #ff4500;
-        }
-        
-        .toast {
-            position: fixed;
-            bottom: 2rem;
-            background: #ff4500;
-            color: white;
-            padding: 1rem 2rem;
-            border-radius: 8px;
-            transform: translateY(100px);
-            transition: transform 0.3s ease;
-            z-index: 1000;
-        }
-        
-        .toast.show {
-            transform: translateY(0);
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <img src="https://nosflare.com/images/nosflare.png" alt="Nosflare Logo" class="logo">
-        <p class="tagline">A serverless Nostr relay powered by Cloudflare</p>
-        
-        ${payToRelaySection}
-        
-        <div class="stats">
-            <div class="stat-item">
-                <div class="stat-value">${relayInfo.supported_nips.length}</div>
-                <div class="stat-label">Supported NIPs</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value">${relayInfo.version}</div>
-                <div class="stat-label">Version</div>
-            </div>
-        </div>
-        
-        <div class="links">
-            <a href="https://github.com/Spl0itable/nosflare" class="link" target="_blank">GitHub</a>
-            <a href="https://nostr.com" class="link" target="_blank">Learn about Nostr</a>
-        </div>
-    </div>
-    
-    <div class="toast" id="toast">Copied to clipboard!</div>
-    
-    <script>
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const relayUrl = protocol + '//' + window.location.host;
-        const relayUrlElement = document.getElementById('relay-url');
-        if (relayUrlElement) {
-            relayUrlElement.textContent = relayUrl;
-        }
-        
-        function copyToClipboard() {
-            const relayUrl = document.getElementById('relay-url').textContent;
-            navigator.clipboard.writeText(relayUrl).then(() => {
-                const toast = document.getElementById('toast');
-                toast.classList.add('show');
-                setTimeout(() => {
-                    toast.classList.remove('show');
-                }, 2000);
-            });
-        }
-        
-        ${PAY_TO_RELAY_ENABLED ? `
-        // Payment handling code
-        let paymentCheckInterval;
-
-        async function checkPaymentStatus() {
-            if (!window.nostr || !window.nostr.getPublicKey) return false;
-            
-            try {
-                const pubkey = await window.nostr.getPublicKey();
-                const response = await fetch('/api/check-payment?pubkey=' + pubkey);
-                const data = await response.json();
-                
-                if (data.paid) {
-                    showRelayAccess();
-                    return true;
-                }
-                return false;
-            } catch (error) {
-                console.error('Error checking payment status:', error);
-                return false;
-            }
-        }
-
-        function showRelayAccess() {
-            const paySection = document.getElementById('paySection');
-            const accessSection = document.getElementById('accessSection');
-            
-            if (paySection && accessSection) {
-                paySection.style.transition = 'opacity 0.3s ease-out';
-                paySection.style.opacity = '0';
-                
-                setTimeout(() => {
-                    paySection.style.display = 'none';
-                    accessSection.style.display = 'block';
-                    accessSection.style.opacity = '0';
-                    accessSection.style.transition = 'opacity 0.3s ease-in';
-                    
-                    void accessSection.offsetHeight;
-                    
-                    accessSection.style.opacity = '1';
-                }, 300);
-            }
-            
-            if (paymentCheckInterval) {
-                clearInterval(paymentCheckInterval);
-                paymentCheckInterval = null;
-            }
-        }
-
-        window.addEventListener('payment-success', async (event) => {
-            console.log('Payment success event received');
-            setTimeout(() => {
-                showRelayAccess();
-            }, 500);
-        });
-
-        async function initPayment() {
-            const script = document.createElement('script');
-            script.src = 'https://cdn.jsdelivr.net/gh/Spl0itable/nosflare@main/nostr-zap.js';
-            script.onload = () => {
-                if (window.nostrZap) {
-                    window.nostrZap.initTargets('#payButton');
-                    
-                    document.getElementById('payButton').addEventListener('click', () => {
-                        if (!paymentCheckInterval) {
-                            paymentCheckInterval = setInterval(async () => {
-                                await checkPaymentStatus();
-                            }, 3000);
-                        }
-                    });
-                }
-            };
-            document.head.appendChild(script);
-            
-            await checkPaymentStatus();
-        }
-
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', initPayment);
-        } else {
-            initPayment();
-        }
-        ` : ''}
-    </script>
-    ${PAY_TO_RELAY_ENABLED ? '<script src="https://unpkg.com/nostr-login@latest/dist/unpkg.js" data-perms="sign_event:1" data-methods="connect,extension,local" data-dark-mode="true"></script>' : ''}
-</body>
-</html>
-  `;
-
-  return new Response(html, {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/html;charset=UTF-8',
-      'Cache-Control': 'public, max-age=3600'
-    }
-  });
-}
-
-async function serveFavicon(): Promise<Response> {
-  const response = await fetch(relayInfo.icon);
-  if (response.ok) {
-    const headers = new Headers(response.headers);
-    headers.set("Cache-Control", "max-age=3600");
-    return new Response(response.body, {
-      status: response.status,
-      headers: headers,
-    });
-  }
-  return new Response(null, { status: 404 });
-}
-
-function handleNIP05Request(url: URL): Response {
-  const name = url.searchParams.get("name");
-  if (!name) {
-    return new Response(JSON.stringify({ error: "Missing 'name' parameter" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" }
-    });
-  }
-
-  const pubkey = nip05Users[name.toLowerCase()];
-  if (!pubkey) {
-    return new Response(JSON.stringify({ error: "User not found" }), {
-      status: 404,
-      headers: { "Content-Type": "application/json" }
-    });
-  }
-
-  const response = {
-    names: { [name]: pubkey },
-    relays: { [pubkey]: [] }
-  };
-
-  return new Response(JSON.stringify(response), {
-    status: 200,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*"
-    }
-  });
-}
-
-async function handleCheckPayment(request: Request, env: Env): Promise<Response> {
-  const url = new URL(request.url);
-  const pubkey = url.searchParams.get('pubkey');
-
-  if (!pubkey) {
-    return new Response(JSON.stringify({ error: 'Missing pubkey' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  const paid = await hasPaidForRelay(pubkey, env);
-
-  if (paid === null) {
-    return new Response(JSON.stringify({ error: 'Unable to verify payment status' }), {
-      status: 503,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-    });
-  }
-
-  return new Response(JSON.stringify({ paid }), {
-    status: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*'
-    }
-  });
-}
-
-async function handlePaymentNotification(request: Request, env: Env): Promise<Response> {
-  if (request.method !== 'POST') {
-    return new Response('Method not allowed', { status: 405 });
-  }
-
-  try {
-    const url = new URL(request.url);
-    const pubkey = url.searchParams.get('npub');
-
-    if (!pubkey) {
-      return new Response(JSON.stringify({ error: 'Missing pubkey' }), {
-        status: 400,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
-        }
-      });
-    }
-
-    const success = await savePaidPubkey(pubkey, env);
-
-    return new Response(JSON.stringify({
-      success,
-      message: success ? 'Payment recorded successfully' : 'Failed to save payment'
-    }), {
-      status: success ? 200 : 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
-    });
-  } catch (error) {
-    console.error('Error processing payment notification:', error);
-    return new Response(JSON.stringify({ error: 'Invalid request' }), {
-      status: 400,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
-    });
-  }
-}
-
-// Multi-region DO selection logic with location hints
-async function getOptimalDO(cf: any, env: Env, url: URL): Promise<{ stub: DurableObjectStub; doName: string }> {
-  const continent = cf?.continent || 'NA';
-  const country = cf?.country || 'US';
-  const region = cf?.region || 'unknown';
-  const colo = cf?.colo || 'unknown';
-
-  console.log(`User location: continent=${continent}, country=${country}, region=${region}, colo=${colo}`);
-
-  // All 9 endpoints with their location hints
-  const ALL_ENDPOINTS = [
-    { name: 'relay-WNAM-primary', hint: 'wnam' },
-    { name: 'relay-ENAM-primary', hint: 'enam' },
-    { name: 'relay-WEUR-primary', hint: 'weur' },
-    { name: 'relay-EEUR-primary', hint: 'eeur' },
-    { name: 'relay-APAC-primary', hint: 'apac' },
-    { name: 'relay-OC-primary', hint: 'oc' },
-    { name: 'relay-SAM-primary', hint: 'sam' },
-    { name: 'relay-AFR-primary', hint: 'afr' },
-    { name: 'relay-ME-primary', hint: 'me' }
-  ];
-
-  // Country to hint mapping
-  const countryToHint: Record<string, string> = {
-    // North America
-    'US': 'enam', 'CA': 'enam', 'MX': 'wnam',
-
-    // Central America & Caribbean (route to WNAM)
-    'GT': 'wnam', 'BZ': 'wnam', 'SV': 'wnam', 'HN': 'wnam', 'NI': 'wnam',
-    'CR': 'wnam', 'PA': 'wnam', 'CU': 'wnam', 'DO': 'wnam', 'HT': 'wnam',
-    'JM': 'wnam', 'PR': 'wnam', 'TT': 'wnam', 'BB': 'wnam',
-
-    // South America
-    'BR': 'sam', 'AR': 'sam', 'CL': 'sam', 'CO': 'sam', 'PE': 'sam',
-    'VE': 'sam', 'EC': 'sam', 'BO': 'sam', 'PY': 'sam', 'UY': 'sam',
-    'GY': 'sam', 'SR': 'sam', 'GF': 'sam',
-
-    // Western Europe
-    'GB': 'weur', 'FR': 'weur', 'DE': 'weur', 'ES': 'weur', 'IT': 'weur',
-    'NL': 'weur', 'BE': 'weur', 'CH': 'weur', 'AT': 'weur', 'PT': 'weur',
-    'IE': 'weur', 'LU': 'weur', 'MC': 'weur', 'AD': 'weur', 'SM': 'weur',
-    'VA': 'weur', 'LI': 'weur', 'MT': 'weur',
-
-    // Nordic countries (route to WEUR)
-    'SE': 'weur', 'NO': 'weur', 'DK': 'weur', 'FI': 'weur', 'IS': 'weur',
-
-    // Eastern Europe
-    'PL': 'eeur', 'RU': 'eeur', 'UA': 'eeur', 'RO': 'eeur', 'CZ': 'eeur',
-    'HU': 'eeur', 'GR': 'eeur', 'BG': 'eeur', 'SK': 'eeur', 'HR': 'eeur',
-    'RS': 'eeur', 'SI': 'eeur', 'BA': 'eeur', 'AL': 'eeur', 'MK': 'eeur',
-    'ME': 'eeur', 'XK': 'eeur', 'BY': 'eeur', 'MD': 'eeur', 'LT': 'eeur',
-    'LV': 'eeur', 'EE': 'eeur', 'CY': 'eeur',
-
-    // Asia-Pacific
-    'JP': 'apac', 'CN': 'apac', 'KR': 'apac', 'IN': 'apac', 'SG': 'apac',
-    'TH': 'apac', 'ID': 'apac', 'MY': 'apac', 'VN': 'apac', 'PH': 'apac',
-    'TW': 'apac', 'HK': 'apac', 'MO': 'apac', 'KH': 'apac', 'LA': 'apac',
-    'MM': 'apac', 'BD': 'apac', 'LK': 'apac', 'NP': 'apac', 'BT': 'apac',
-    'MV': 'apac', 'PK': 'apac', 'AF': 'apac', 'MN': 'apac', 'KP': 'apac',
-    'BN': 'apac', 'TL': 'apac', 'PG': 'apac', 'FJ': 'apac', 'SB': 'apac',
-    'VU': 'apac', 'NC': 'apac', 'PF': 'apac', 'WS': 'apac', 'TO': 'apac',
-    'KI': 'apac', 'PW': 'apac', 'MH': 'apac', 'FM': 'apac', 'NR': 'apac',
-    'TV': 'apac', 'CK': 'apac', 'NU': 'apac', 'TK': 'apac', 'GU': 'apac',
-    'MP': 'apac', 'AS': 'apac',
-
-    // Oceania
-    'AU': 'oc', 'NZ': 'oc',
-
-    // Middle East
-    'AE': 'me', 'SA': 'me', 'IL': 'me', 'TR': 'me', 'EG': 'me',
-    'IQ': 'me', 'IR': 'me', 'SY': 'me', 'JO': 'me', 'LB': 'me',
-    'KW': 'me', 'QA': 'me', 'BH': 'me', 'OM': 'me', 'YE': 'me',
-    'PS': 'me', 'GE': 'me', 'AM': 'me', 'AZ': 'me',
-
-    // Africa
-    'ZA': 'afr', 'NG': 'afr', 'KE': 'afr', 'MA': 'afr', 'TN': 'afr',
-    'DZ': 'afr', 'LY': 'afr', 'ET': 'afr', 'GH': 'afr', 'TZ': 'afr',
-    'UG': 'afr', 'SD': 'afr', 'AO': 'afr', 'MZ': 'afr', 'MG': 'afr',
-    'CM': 'afr', 'CI': 'afr', 'NE': 'afr', 'BF': 'afr', 'ML': 'afr',
-    'MW': 'afr', 'ZM': 'afr', 'SN': 'afr', 'SO': 'afr', 'TD': 'afr',
-    'ZW': 'afr', 'GN': 'afr', 'RW': 'afr', 'BJ': 'afr', 'BI': 'afr',
-    'TG': 'afr', 'SL': 'afr', 'LR': 'afr', 'MR': 'afr', 'CF': 'afr',
-    'ER': 'afr', 'GM': 'afr', 'BW': 'afr', 'NA': 'afr', 'GA': 'afr',
-    'LS': 'afr', 'GW': 'afr', 'GQ': 'afr', 'MU': 'afr', 'SZ': 'afr',
-    'DJ': 'afr', 'KM': 'afr', 'CV': 'afr', 'SC': 'afr', 'ST': 'afr',
-    'SS': 'afr', 'EH': 'afr', 'CG': 'afr', 'CD': 'afr',
-
-    // Central Asia (route to APAC)
-    'KZ': 'apac', 'UZ': 'apac', 'TM': 'apac', 'TJ': 'apac', 'KG': 'apac',
-  };
-
-  // US state-level routing
-  const usStateToHint: Record<string, string> = {
-    // Western states -> WNAM
-    'California': 'wnam', 'Oregon': 'wnam', 'Washington': 'wnam', 'Nevada': 'wnam', 'Arizona': 'wnam',
-    'Utah': 'wnam', 'Idaho': 'wnam', 'Montana': 'wnam', 'Wyoming': 'wnam', 'Colorado': 'wnam',
-    'New Mexico': 'wnam', 'Alaska': 'wnam', 'Hawaii': 'wnam',
-
-    // Eastern states -> ENAM
-    'New York': 'enam', 'Florida': 'enam', 'Texas': 'enam', 'Illinois': 'enam', 'Georgia': 'enam',
-    'Pennsylvania': 'enam', 'Ohio': 'enam', 'Michigan': 'enam', 'North Carolina': 'enam', 'Virginia': 'enam',
-    'Massachusetts': 'enam', 'New Jersey': 'enam', 'Maryland': 'enam', 'Connecticut': 'enam', 'Maine': 'enam',
-    'New Hampshire': 'enam', 'Vermont': 'enam', 'Rhode Island': 'enam', 'South Carolina': 'enam', 'Tennessee': 'enam',
-    'Alabama': 'enam', 'Mississippi': 'enam', 'Louisiana': 'enam', 'Arkansas': 'enam', 'Missouri': 'enam',
-    'Iowa': 'enam', 'Minnesota': 'enam', 'Wisconsin': 'enam', 'Indiana': 'enam', 'Kentucky': 'enam',
-    'West Virginia': 'enam', 'Delaware': 'enam', 'Oklahoma': 'enam', 'Kansas': 'enam', 'Nebraska': 'enam',
-    'South Dakota': 'enam', 'North Dakota': 'enam',
-
-    // DC
-    'District of Columbia': 'enam',
-  };
-
-  // Continent to hint fallback
-  const continentToHint: Record<string, string> = {
-    'NA': 'enam',
-    'SA': 'sam',
-    'EU': 'weur',
-    'AS': 'apac',
-    'AF': 'afr',
-    'OC': 'oc'
-  };
-
-  // Determine best hint 
-  let bestHint: string;
-
-  // Only check US states if country is actually US
-  if (country === 'US' && region && region !== 'unknown') {
-    bestHint = usStateToHint[region] || 'enam';
-  } else {
-    // First try country mapping, then continent fallback
-    bestHint = countryToHint[country] || continentToHint[continent] || 'enam';
-  }
-
-  // Find the primary endpoint based on hint
-  const primaryEndpoint = ALL_ENDPOINTS.find(ep => ep.hint === bestHint) || ALL_ENDPOINTS[1]; // Default to ENAM
-
-  // Order endpoints by proximity (primary first, then others)
-  const orderedEndpoints = [
-    primaryEndpoint,
-    ...ALL_ENDPOINTS.filter(ep => ep.name !== primaryEndpoint.name)
-  ];
-
-  // Try each endpoint
-  for (const endpoint of orderedEndpoints) {
-    try {
-      const id = env.RELAY_WEBSOCKET.idFromName(endpoint.name);
-      const stub = env.RELAY_WEBSOCKET.get(id, { locationHint: endpoint.hint });
-
-      console.log(`Connected to DO: ${endpoint.name} (hint: ${endpoint.hint})`);
-      // @ts-ignore
-      return { stub, doName: endpoint.name };
-    } catch (error) {
-      console.log(`Failed to connect to ${endpoint.name}: ${error}`);
-    }
-  }
-
-  // Fallback to ENAM
-  const fallback = ALL_ENDPOINTS[1]; // ENAM
-  const id = env.RELAY_WEBSOCKET.idFromName(fallback.name);
-  const stub = env.RELAY_WEBSOCKET.get(id, { locationHint: fallback.hint });
-  console.log(`Fallback to DO: ${fallback.name} (hint: ${fallback.hint})`);
-  // @ts-ignore
-  return { stub, doName: fallback.name };
-}
-
-// Database pruning helper functions
-
-// Get the current database size in bytes
-async function getDatabaseSizeBytes(session: D1DatabaseSession): Promise<number> {
-  try {
-    const result = await session.prepare('SELECT 1').run();
-    const sizeAfter = (result.meta as { size_after?: number } | undefined)?.size_after;
-
-    if (typeof sizeAfter === 'number' && sizeAfter > 0) {
-      return sizeAfter;
-    }
-    return 0;
-  } catch (error) {
-    console.error('Error getting database size:', error);
-    return 0;
-  }
-}
-
-// Prune old events to reduce database size
-// Returns the number of events deleted
-async function pruneOldEvents(session: D1DatabaseSession, targetSizeBytes: number): Promise<{ eventsDeleted: number; finalSizeBytes: number }> {
-  let totalEventsDeleted = 0;
-  let currentSize = await getDatabaseSizeBytes(session);
-
-  console.log(`Starting database pruning. Current size: ${(currentSize / (1024 * 1024 * 1024)).toFixed(2)} GB, Target: ${(targetSizeBytes / (1024 * 1024 * 1024)).toFixed(2)} GB`);
-
-  // Build the protected kinds clause for SQL
-  const protectedKindsArray = Array.from(pruneProtectedKinds);
-  const protectedKindsClause = protectedKindsArray.length > 0
-    ? `AND kind NOT IN (${protectedKindsArray.join(',')})`
-    : '';
-
-  // Keep pruning in batches until we reach target size
-  while (currentSize > targetSizeBytes) {
-    // Find the oldest events (excluding protected kinds)
-    const oldestEvents = await session.prepare(`
-      SELECT id FROM events
-      WHERE 1=1 ${protectedKindsClause}
-      ORDER BY created_at ASC
-      LIMIT ?
-    `).bind(DB_PRUNE_BATCH_SIZE).all();
-
-    if (!oldestEvents.results || oldestEvents.results.length === 0) {
-      console.log('No more events eligible for pruning');
-      break;
-    }
-
-    const eventIds = oldestEvents.results.map((row: any) => row.id as string);
-    const placeholders = eventIds.map(() => '?').join(',');
-
-    // Batch all deletes into a single D1 round-trip
-    const pruneResults = await session.batch([
-      session.prepare(`DELETE FROM event_tags_cache_multi WHERE event_id IN (${placeholders})`).bind(...eventIds),
-      session.prepare(`DELETE FROM events WHERE id IN (${placeholders})`).bind(...eventIds),
-    ]);
-
-    const deletedCount = pruneResults[1]?.meta?.changes || eventIds.length;
-    totalEventsDeleted += deletedCount;
-
-    console.log(`Pruned ${deletedCount} events (total: ${totalEventsDeleted})`);
-
-    // Check current size after deletion
-    currentSize = await getDatabaseSizeBytes(session);
-    console.log(`Current database size: ${(currentSize / (1024 * 1024 * 1024)).toFixed(2)} GB`);
-
-    // Safety break - don't delete more than 100,000 events in a single maintenance run
-    if (totalEventsDeleted >= 100000) {
-      console.log('Reached maximum pruning limit for this run (100,000 events)');
-      break;
-    }
-  }
-
-  return { eventsDeleted: totalEventsDeleted, finalSizeBytes: currentSize };
-}
-
-// Export functions for use by Durable Object
-export {
-  verifyEventSignature,
-  hasPaidForRelay,
-  processEvent,
-  queryEvents,
-  calculateQueryComplexity
-};
-
-// Main worker export with Durable Object
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    try {
-      const url = new URL(request.url);
-
-      // Payment endpoints
-      if (request.method === 'POST' && url.searchParams.has('notify-zap') && PAY_TO_RELAY_ENABLED) {
-        return await handlePaymentNotification(request, env);
-      }
-
-      if (url.pathname === "/api/check-payment" && PAY_TO_RELAY_ENABLED) {
-        return await handleCheckPayment(request, env);
-      }
-
-      // Main endpoints
-      if (url.pathname === "/") {
-        if (request.headers.get("Upgrade") === "websocket") {
-          // Get Cloudflare location info
-          const cf = (request as any).cf;
-
-          // Get optimal DO based on user location
-          const { stub, doName } = await getOptimalDO(cf, env, url);
-
-          // Add location info to the request
-          const newUrl = new URL(request.url);
-          newUrl.searchParams.set('region', cf?.region || 'unknown');
-          newUrl.searchParams.set('colo', cf?.colo || 'unknown');
-          newUrl.searchParams.set('continent', cf?.continent || 'unknown');
-          newUrl.searchParams.set('country', cf?.country || 'unknown');
-          newUrl.searchParams.set('doName', doName);
-
-          return stub.fetch(new Request(newUrl, request));
-        } else if (request.headers.get("Accept") === "application/nostr+json") {
-          return handleRelayInfoRequest(request);
-        } else {
-          // Initialize database in background
-          ctx.waitUntil(
-            initializeDatabase(env.RELAY_DATABASE)
-              .catch(e => console.error("DB init error:", e))
-          );
-          return serveLandingPage();
-        }
-      } else if (url.pathname === "/.well-known/nostr.json") {
-        return handleNIP05Request(url);
-      } else if (url.pathname === "/favicon.ico") {
-        return await serveFavicon();
-      } else {
-        return new Response("Invalid request", { status: 400 });
-      }
-    } catch (error) {
-      console.error("Error in fetch handler:", error);
-      return new Response("Internal Server Error", { status: 500 });
-    }
-  },
-
-  // Scheduled handler for 24hr database maintenance (runs daily at 00:00 UTC)
-  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    console.log('Running scheduled 24hr database maintenance...');
-
-    try {
-      const session = env.RELAY_DATABASE.withSession('first-primary');
-
-      // Check database size and prune if necessary (D1 has a 10GB limit)
-      if (DB_PRUNING_ENABLED) {
-        const currentSizeBytes = await getDatabaseSizeBytes(session);
-        const currentSizeGB = currentSizeBytes / (1024 * 1024 * 1024);
-        console.log(`Current database size: ${currentSizeGB.toFixed(2)} GB (threshold: ${DB_SIZE_THRESHOLD_GB} GB)`);
-
-        if (currentSizeGB >= DB_SIZE_THRESHOLD_GB) {
-          console.log(`Database size (${currentSizeGB.toFixed(2)} GB) exceeds threshold (${DB_SIZE_THRESHOLD_GB} GB). Starting pruning...`);
-          const targetSizeBytes = DB_PRUNE_TARGET_GB * 1024 * 1024 * 1024;
-          const pruneResult = await pruneOldEvents(session, targetSizeBytes);
-          console.log(`Pruning completed. Deleted ${pruneResult.eventsDeleted} events. Final size: ${(pruneResult.finalSizeBytes / (1024 * 1024 * 1024)).toFixed(2)} GB`);
-        } else {
-          console.log('Database size is within limits. No pruning needed.');
-        }
-      } else {
-        console.log('Database pruning is disabled.');
-      }
-
-      // Run PRAGMA optimize (SQLite's intelligent optimization)
-      console.log('Running PRAGMA optimize...');
-      await session.prepare('PRAGMA optimize').run();
-      console.log('PRAGMA optimize completed');
-
-      // Run ANALYZE to update query planner statistics
-      console.log('Running ANALYZE on all tables...');
-      await session.prepare('ANALYZE events').run();
-      await session.prepare('ANALYZE tags').run();
-      await session.prepare('ANALYZE event_tags_cache_multi').run();
-      await session.prepare('ANALYZE content_hashes').run();
-      console.log('ANALYZE completed - query planner statistics updated');
-
-      console.log('Scheduled 24hr database maintenance completed successfully');
-    } catch (error) {
-      console.error('Scheduled maintenance failed:', error);
-    }
-  }
-};
-
-// Export the Durable Object class
-export { RelayWebSocket };
+          const estimatedRows = (countResult?.count
