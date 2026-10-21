@@ -13,6 +13,8 @@ const {
   PAY_TO_RELAY_ENABLED,
   RELAY_ACCESS_PRICE_SATS,
   relayNpub,
+  LNURL_SERVER_PUBKEY,
+  PAYEE_LUD16,
   nip05Users,
   enableAntiSpam,
   enableGlobalDuplicateCheck,
@@ -923,7 +925,7 @@ async function handlePaymentNotification(request: Request, env: Env): Promise<Re
       });
     }
 
-    const verified = await verifyZapReceipt(receipt, relayNpub, RELAY_ACCESS_PRICE_SATS, verifyEventSignature);
+    const verified = await verifyZapReceipt(receipt, relayNpub, RELAY_ACCESS_PRICE_SATS, verifyEventSignature, LNURL_SERVER_PUBKEY, PAYEE_LUD16);
     if (!verified) {
       return new Response(JSON.stringify({ error: 'Invalid zap receipt' }), {
         status: 403,
@@ -1223,6 +1225,7 @@ export default {
 
       // Run ANALYZE to update query planner statistics
       console.log('Running ANALYZE on all tables...');
+      console.log('Running ANALYZE on events...');
       await session.prepare('ANALYZE events').run();
       await session.prepare('ANALYZE tags').run();
       await session.prepare('ANALYZE event_tags_cache_multi').run();
