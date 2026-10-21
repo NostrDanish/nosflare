@@ -100,6 +100,18 @@ View detailed pricing → [Workers](https://developers.cloudflare.com/workers/pl
 
 Nosflare allows for "pay to relay", which lets the relay operator accept Bitcoin lightning payments through Nostr zaps of SATS. The price can be whatever the relay operator chooses and sets detailed above in the optional settings section. This allows relay operators to turn their relay into a paid relay. Once enabled, every event sent to the relay will have its author's pubkey checked to see if they've paid for access.
 
+### Payment verification (zap receipts)
+
+Payments are only recorded from a cryptographically verified [NIP-57](https://github.com/nostr-protocol/nips/blob/master/57.md) zap receipt. The payment notification endpoint (`POST /?notify-zap`) requires a JSON body of the form `{ "event": { ... } }` where `event` is a kind `9735` zap receipt that:
+
+- has a valid Schnorr signature;
+- is addressed to the relay operator (`p` tag must match the hex pubkey of the configured `relayNpub`);
+- identifies the payer in its `P` tag (this pubkey receives relay access);
+- includes the paid `bolt11` invoice and an `amount` (in millisatoshis) of at least `RELAY_ACCESS_PRICE_SATS`;
+- is not older than 30 days.
+
+Requests without a valid receipt are rejected (`400`/`403`). The previous behavior of marking any caller-supplied `?npub=` as paid without proof no longer works. The relay's landing page discovers the zap receipt published by the operator's LNURL server after settlement and submits it automatically.
+
 ![Pay to relay](images/ptr.gif)
 
 ## Roadmap
