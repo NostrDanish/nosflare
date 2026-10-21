@@ -1225,7 +1225,6 @@ export default {
 
       // Run ANALYZE to update query planner statistics
       console.log('Running ANALYZE on all tables...');
-      console.log('Running ANALYZE on events...');
       await session.prepare('ANALYZE events').run();
       await session.prepare('ANALYZE tags').run();
       await session.prepare('ANALYZE event_tags_cache_multi').run();

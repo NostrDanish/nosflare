@@ -94,7 +94,7 @@ You can deploy Nosflare using either the Wrangler CLI or directly through the Cl
 
 Nosflare typically costs **75-90% less** than traditional relay hosting while providing **better performance**, **global scale**, and **zero maintenance**.
 
-View detailed pricing → [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [Durable Objects](https://developers.cloudflare.com/durable-objects/pricing/), [D1 database](https://developers.cloudflare.com/d1/platform/pricing/)
+View detailed pricing → [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [Durable Objects](https://developers.cloudflare.com/durable-objects/platform/pricing/), [D1 database](https://developers.cloudflare.com/d1/platform/pricing/)
 
 ## Pay To Relay
 
