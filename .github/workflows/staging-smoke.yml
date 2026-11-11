@@ -22,6 +22,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Install dependencies
+        run: npm install --no-package-lock --no-audit --no-fund
       - name: Test NIP-11 and WebSocket protocol
         run: npm run smoke:staging
         env:
