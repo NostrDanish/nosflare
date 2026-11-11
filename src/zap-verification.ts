@@ -105,7 +105,7 @@ export async function verifyZapReceipt(
     if (requestAmounts.length > 1) return null;
     if (requestAmounts.length === 1) {
       const requested = requestAmounts[0];
-      if (!/^\\d+$/.test(requested)) return null;
+      if (!/^[0-9]+$/.test(requested)) return null;
       const requestedMsats = Number(requested);
       if (!Number.isSafeInteger(requestedMsats) || requestedMsats !== amountMsats) return null;
     }
