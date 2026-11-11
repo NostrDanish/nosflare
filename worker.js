@@ -2798,35 +2798,97 @@ __name(isDatabaseSchemaCurrent, "isDatabaseSchemaCurrent");
 var MAX_RECEIPT_AGE_SECONDS = 30 * 24 * 3600;
 var LNURL_PUBKEY_CACHE_TTL_MS = 60 * 60 * 1e3;
 var lnurlPubkeyCache = /* @__PURE__ */ new Map();
+function bolt11AmountMsats(invoice) {
+  try {
+    const normalized = String(invoice ?? "").trim().toLowerCase();
+    const separator = normalized.lastIndexOf("1");
+    if (separator < 3)
+      return null;
+    const hrp = normalized.slice(0, separator);
+    const match = /^ln(?:bcrt|bc|tbs|tb|sb)([0-9]+)?([munp]?)$/.exec(hrp);
+    if (!match || !match[1])
+      return null;
+    const amount = BigInt(match[1]);
+    let millisatoshis;
+    switch (match[2]) {
+      case "m":
+        millisatoshis = amount * 100000000n;
+        break;
+      case "u":
+        millisatoshis = amount * 100000n;
+        break;
+      case "n":
+        millisatoshis = amount * 100n;
+        break;
+      case "p":
+        if (amount % 10n !== 0n)
+          return null;
+        millisatoshis = amount / 10n;
+        break;
+      default:
+        millisatoshis = amount * 100000000000n;
+    }
+    if (millisatoshis <= 0n || millisatoshis > BigInt(Number.MAX_SAFE_INTEGER))
+      return null;
+    return Number(millisatoshis);
+  } catch {
+    return null;
+  }
+}
+__name(bolt11AmountMsats, "bolt11AmountMsats");
 async function verifyZapReceipt(event, operatorNpub, priceSats, verifyEvent, lnurlServerPubkey, payeeLud16) {
   try {
-    if (!event || event.kind !== 9735)
+    if (!event || event.kind !== 9735 || !Array.isArray(event.tags))
       return null;
     const operatorHex = npubToHex(operatorNpub);
-    if (!operatorHex) {
-      console.error("Configured relayNpub is not a valid npub");
+    if (!operatorHex || !Number.isSafeInteger(priceSats) || priceSats <= 0)
+      return null;
+    const tagValues = /* @__PURE__ */ __name((tags, name) => tags.filter((item) => item[0] === name).map((item) => item[1] ?? ""), "tagValues");
+    const recipients = tagValues(event.tags, "p");
+    const invoices = tagValues(event.tags, "bolt11");
+    const descriptions = tagValues(event.tags, "description");
+    const receiptPayers = tagValues(event.tags, "P");
+    if (recipients.length !== 1 || recipients[0] !== operatorHex)
+      return null;
+    if (invoices.length !== 1 || descriptions.length !== 1 || receiptPayers.length > 1)
+      return null;
+    let zapRequest;
+    try {
+      zapRequest = JSON.parse(descriptions[0]);
+    } catch {
       return null;
     }
-    const tags = event.tags ?? [];
-    const tag = /* @__PURE__ */ __name((name) => tags.find((t) => t[0] === name && t[1])?.[1], "tag");
-    if (tag("p") !== operatorHex)
+    if (!zapRequest || zapRequest.kind !== 9734 || !Array.isArray(zapRequest.tags))
       return null;
-    const payer = tag("P");
-    if (!payer || !/^[0-9a-f]{64}$/.test(payer))
+    const requestRecipients = tagValues(zapRequest.tags, "p");
+    if (requestRecipients.length !== 1 || requestRecipients[0] !== operatorHex)
       return null;
-    const amountTag = tag("amount");
-    if (!amountTag || !/^\d+$/.test(amountTag))
+    const payer = String(zapRequest.pubkey ?? "").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(payer))
       return null;
-    const amountMsats = Number(amountTag);
-    if (!Number.isSafeInteger(priceSats) || priceSats <= 0 || !Number.isSafeInteger(amountMsats) || amountMsats < priceSats * 1e3)
+    if (receiptPayers.length === 1 && receiptPayers[0]?.toLowerCase() !== payer)
       return null;
-    const bolt11 = tag("bolt11");
-    if (!bolt11 || !bolt11.toLowerCase().startsWith("ln"))
+    const bolt11 = invoices[0];
+    const amountMsats = bolt11AmountMsats(bolt11);
+    if (amountMsats === null || amountMsats < priceSats * 1e3)
       return null;
+    const requestAmounts = tagValues(zapRequest.tags, "amount");
+    if (requestAmounts.length > 1)
+      return null;
+    if (requestAmounts.length === 1) {
+      const requested = requestAmounts[0];
+      if (!/^[0-9]+$/.test(requested))
+        return null;
+      const requestedMsats = Number(requested);
+      if (!Number.isSafeInteger(requestedMsats) || requestedMsats !== amountMsats)
+        return null;
+    }
     const now = Math.floor(Date.now() / 1e3);
-    if (event.created_at > now + 900 || event.created_at < now - MAX_RECEIPT_AGE_SECONDS)
+    if (!Number.isSafeInteger(event.created_at) || event.created_at > now + 900 || event.created_at < now - MAX_RECEIPT_AGE_SECONDS)
       return null;
-    if (!await verifyEvent(event))
+    if (!Number.isSafeInteger(zapRequest.created_at) || zapRequest.created_at > now + 900 || zapRequest.created_at < now - 24 * 60 * 60)
+      return null;
+    if (!await verifyEvent(event) || !await verifyEvent(zapRequest))
       return null;
     const issuerKey = await resolveLnurlServerPubkey(lnurlServerPubkey, payeeLud16);
     if (!issuerKey || event.pubkey !== issuerKey)
@@ -4687,7 +4749,9 @@ function serveLandingPage() {
                 const payer = await window.nostr.getPublicKey();
                 const since = Math.floor(Date.now() / 1000) - 3600;
                 const relays = ['wss://relay.damus.io', 'wss://relay.primal.net', 'wss://sendit.nosflare.com'];
-                const filter = { kinds: [9735], '#P': [payer], since: since, limit: 10 };
+                const operatorPubkey = 'c45041618951bb6012ac23f5cdf3d740465f2d640be841fd9bb1d0733370cd3c';
+                // P is optional on a NIP-57 receipt; query by the mandatory recipient p tag.
+                const filter = { kinds: [9735], '#p': [operatorPubkey], since: since, limit: 30 };
                 let recorded = false;
 
                 const closeAll = () => {
@@ -4696,6 +4760,18 @@ function serveLandingPage() {
 
                 const submitReceipt = async (receipt) => {
                     if (recorded) return;
+                    // Receipt P is optional. Identify the payer from the signed
+                    // kind-9734 request in the mandatory description tag.
+                    const descriptionTag = (receipt.tags || []).find((tag) => tag[0] === 'description' && tag[1]);
+                    let zapRequest;
+                    try {
+                        zapRequest = descriptionTag ? JSON.parse(descriptionTag[1]) : null;
+                    } catch (error) {
+                        return;
+                    }
+                    if (!zapRequest || zapRequest.pubkey !== payer) return;
+                    const receiptPayer = (receipt.tags || []).find((tag) => tag[0] === 'P' && tag[1]);
+                    if (receiptPayer && receiptPayer[1] !== payer) return;
                     try {
                         const response = await originalFetch(window.location.origin + '?notify-zap=true', {
                             method: 'POST',
