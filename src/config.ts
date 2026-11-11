@@ -13,6 +13,12 @@ export const relayNpub = "npub1c3gyzcvf2xakqy4vy06umu7hgpr97ttyp05yrlvmk8g8xvmse
 export const PAY_TO_RELAY_ENABLED = true; // Set to false to disable pay to relay
 export const RELAY_ACCESS_PRICE_SATS = 5000; // Price in SATS for relay access
 
+// NIP-57 zap-receipt issuer verification. Keep both empty until the
+// configured Lightning payee is verified; receipt verification fails closed.
+export const LNURL_SERVER_PUBKEY = ""; // Hex pubkey that signs this payee's zap receipts
+export const PAYEE_LUD16 = ""; // Verified Lightning address (name@domain), fallback discovery only
+
+
 // Relay info
 export const relayInfo: RelayInfo = {
   name: "0xServerless",

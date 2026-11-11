@@ -4,6 +4,7 @@ import * as config from './config';
 import { RelayWebSocket } from './durable-object';
 import { isReplaceableKind, isParameterizedReplaceableKind, isIncomingReplaceableWinner, parseAddressableCoordinate } from './nostr-protocol';
 import { isDatabaseSchemaCurrent } from './db-schema';
+import { verifyZapReceipt } from './zap-verification';
 
 // Import config values
 const {
@@ -11,6 +12,8 @@ const {
   PAY_TO_RELAY_ENABLED,
   RELAY_ACCESS_PRICE_SATS,
   relayNpub,
+  LNURL_SERVER_PUBKEY,
+  PAYEE_LUD16,
   nip05Users,
   enableAntiSpam,
   enableGlobalDuplicateCheck,
@@ -403,7 +406,11 @@ async function hasPaidForRelay(pubkey: string, env: Env): Promise<boolean | null
   }
 }
 
-async function savePaidPubkey(pubkey: string, env: Env): Promise<boolean> {
+async function savePaidPubkey(
+  pubkey: string,
+  env: Env,
+  amountSats: number = RELAY_ACCESS_PRICE_SATS
+): Promise<boolean> {
   try {
     const session = env.RELAY_DATABASE.withSession('first-primary');
     await session.prepare(`
@@ -412,7 +419,7 @@ async function savePaidPubkey(pubkey: string, env: Env): Promise<boolean> {
       ON CONFLICT(pubkey) DO UPDATE SET
         paid_at = excluded.paid_at,
         amount_sats = excluded.amount_sats
-    `).bind(pubkey, Math.floor(Date.now() / 1000), RELAY_ACCESS_PRICE_SATS).run();
+    `).bind(pubkey, Math.floor(Date.now() / 1000), amountSats).run();
     return true;
   } catch (error) {
     console.error(`Error saving paid pubkey ${pubkey}:`, error);
@@ -2044,6 +2051,96 @@ function serveLandingPage(): Response {
         ${PAY_TO_RELAY_ENABLED ? `
         // Payment handling code
         let paymentCheckInterval;
+        // Shim: the upstream nostr-zap.js bundle posts only an npub to
+        // ?notify-zap after it spots a zap receipt on public relays. The
+        // verified endpoint rejects that legacy call (no proof of payment),
+        // so swallow it here and answer success; the receipt watcher below
+        // performs the real, cryptographically verified submission.
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = function (input, init) {
+            try {
+                const reqUrl = String(typeof input === 'string' ? input : input.url);
+                if (reqUrl.indexOf('notify-zap') !== -1 && reqUrl.indexOf('npub=') !== -1) {
+                    return Promise.resolve(new Response(JSON.stringify({ success: true, pendingVerification: true }), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' }
+                    }));
+                }
+            } catch (error) {}
+            return originalFetch(input, init);
+        };
+
+        // Zap receipt submission: after the Lightning invoice is paid, the
+        // operator's LNURL server publishes a kind 9735 zap receipt to public
+        // relays. Find it and submit it to /?notify-zap, which verifies the
+        // receipt (signature, recipient, amount, bolt11, freshness) before
+        // recording the payment.
+        let receiptWatcherStarted = false;
+        const receiptSockets = [];
+
+        async function submitZapReceipts() {
+            if (receiptWatcherStarted || !window.nostr || !window.nostr.getPublicKey) return;
+            receiptWatcherStarted = true;
+
+            try {
+                const payer = await window.nostr.getPublicKey();
+                const since = Math.floor(Date.now() / 1000) - 3600;
+                const relays = ['wss://relay.damus.io', 'wss://relay.primal.net', 'wss://sendit.nosflare.com'];
+                const filter = { kinds: [9735], '#P': [payer], since: since, limit: 10 };
+                let recorded = false;
+
+                const closeAll = () => {
+                    receiptSockets.forEach((ws) => { try { ws.close(); } catch (error) {} });
+                };
+
+                const submitReceipt = async (receipt) => {
+                    if (recorded) return;
+                    try {
+                        const response = await originalFetch(window.location.origin + '?notify-zap=true', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ event: receipt })
+                        });
+                        const data = await response.json().catch(() => ({}));
+                        if (response.ok && data.success) {
+                            recorded = true;
+                            closeAll();
+                            checkPaymentStatus();
+                        }
+                    } catch (error) {
+                        console.error('Error submitting zap receipt:', error);
+                    }
+                };
+
+                relays.forEach((relayUrl) => {
+                    try {
+                        const ws = new WebSocket(relayUrl);
+                        receiptSockets.push(ws);
+                        const subId = 'zapreceipt-' + Math.random().toString(36).slice(2, 10);
+
+                        ws.onopen = () => {
+                            ws.send(JSON.stringify(['REQ', subId, filter]));
+                        };
+                        ws.onmessage = (msg) => {
+                            try {
+                                const data = JSON.parse(msg.data);
+                                if (data[0] === 'EVENT' && data[2] && data[2].kind === 9735) {
+                                    submitReceipt(data[2]);
+                                } else if (data[0] === 'EOSE') {
+                                    // Keep the subscription open briefly for live receipts.
+                                }
+                            } catch (error) {}
+                        };
+                        ws.onerror = () => { try { ws.close(); } catch (error) {} };
+
+                        setTimeout(() => { try { ws.close(); } catch (error) {} }, 60000);
+                    } catch (error) {}
+                });
+            } catch (error) {
+                console.error('Error starting zap receipt watcher:', error);
+            }
+        }
+
 
         async function checkPaymentStatus() {
             if (!window.nostr || !window.nostr.getPublicKey) return false;
@@ -2105,6 +2202,7 @@ function serveLandingPage(): Response {
                     window.nostrZap.initTargets('#payButton');
                     
                     document.getElementById('payButton').addEventListener('click', () => {
+                        submitZapReceipts();
                         if (!paymentCheckInterval) {
                             paymentCheckInterval = setInterval(async () => {
                                 await checkPaymentStatus();
@@ -2218,39 +2316,49 @@ async function handlePaymentNotification(request: Request, env: Env): Promise<Re
   }
 
   try {
-    const url = new URL(request.url);
-    const pubkey = url.searchParams.get('npub');
+    const body = await request.json() as { event?: NostrEvent };
+    const receipt = body?.event;
 
-    if (!pubkey) {
-      return new Response(JSON.stringify({ error: 'Missing pubkey' }), {
+    if (!receipt) {
+      return new Response(JSON.stringify({ error: 'Missing zap receipt event' }), {
         status: 400,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
-        }
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
       });
     }
 
-    const success = await savePaidPubkey(pubkey, env);
+    const verified = await verifyZapReceipt(
+      receipt,
+      relayNpub,
+      RELAY_ACCESS_PRICE_SATS,
+      verifyEventSignature,
+      LNURL_SERVER_PUBKEY,
+      PAYEE_LUD16
+    );
+
+    if (!verified) {
+      return new Response(JSON.stringify({ error: 'Invalid zap receipt' }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+      });
+    }
+
+    // Keep an audit copy where possible, but never grant access unless verification passed.
+    await saveEventToDatabase(receipt, env).catch(() => undefined);
+    const success = await savePaidPubkey(verified.payer, env, verified.amountSats);
 
     return new Response(JSON.stringify({
       success,
+      pubkey: verified.payer,
       message: success ? 'Payment recorded successfully' : 'Failed to save payment'
     }), {
       status: success ? 200 : 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
   } catch (error) {
     console.error('Error processing payment notification:', error);
     return new Response(JSON.stringify({ error: 'Invalid request' }), {
       status: 400,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
   }
 }

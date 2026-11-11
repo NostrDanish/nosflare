@@ -8,7 +8,7 @@
     "dev": "wrangler dev",
     "deploy": "npm run deploy:staging",
     "typecheck": "tsc --noEmit",
-    "test": "esbuild tests/nostr-protocol.test.ts --bundle --platform=node --format=esm --external:node:* --outfile=/tmp/nosflare-protocol.test.mjs && node --test /tmp/nosflare-protocol.test.mjs",
+    "test": "esbuild tests/nostr-protocol.test.ts --bundle --platform=node --format=esm --external:node:* --outfile=/tmp/nosflare-protocol.test.mjs && esbuild tests/zap-verification.test.ts --bundle --platform=node --format=esm --external:node:* --outfile=/tmp/nosflare-zap-verification.test.mjs && node --test /tmp/nosflare-protocol.test.mjs /tmp/nosflare-zap-verification.test.mjs",
     "deploy:staging": "npm run build && wrangler deploy",
     "deploy:production": "npm run build && wrangler deploy --config wrangler.production.toml",
     "smoke:staging": "node tests/staging-smoke.mjs",
