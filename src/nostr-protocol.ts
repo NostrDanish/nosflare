@@ -26,7 +26,7 @@ export function isIncomingReplaceableWinner(
   existingId: string,
 ): boolean {
   return incomingCreatedAt > existingCreatedAt ||
-    (incomingCreatedAt === existingCreatedAt && incomingId.localeCompare(existingId) < 0);
+    (incomingCreatedAt === existingCreatedAt && incomingId < existingId);
 }
 
 /**
