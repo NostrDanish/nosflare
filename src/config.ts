@@ -19,7 +19,8 @@ export const relayInfo: RelayInfo = {
   description: "just getting started.\n\nBreaking the digital cage, one guide at a time.  \n#Monero • #TOR • #Nostr • #IPFS #mirrors\n\nhttps://linkfork.io/0xprivacy",
   pubkey: "c45041618951bb6012ac23f5cdf3d740465f2d640be841fd9bb1d0733370cd3c",
   contact: "0xPrivacy@tmail.ae",
-  supported_nips: [1, 2, 4, 5, 9, 11, 12, 15, 16, 17, 20, 22, 23, 33, 40, 42, 50, 51, 58, 65, 71, 78, 89, 94],
+  // NIP-40 (expiration enforcement) and NIP-50 (full-text search) are omitted until implemented.
+  supported_nips: [1, 2, 4, 5, 9, 11, 12, 15, 16, 17, 20, 22, 23, 33, 42, 51, 58, 65, 71, 78, 89, 94],
   software: "https://github.com/Spl0itable/nosflare",
   version: "8.9.26",
   icon: "https://i.postimg.cc/zBBG2Nc9/photo-2026-04-14-04-39-04.jpg",
