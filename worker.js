@@ -81,7 +81,7 @@ var relayNpub = "npub1c3gyzcvf2xakqy4vy06umu7hgpr97ttyp05yrlvmk8g8xvmse57qj286r6
 var PAY_TO_RELAY_ENABLED = true;
 var RELAY_ACCESS_PRICE_SATS = 5e3;
 var LNURL_SERVER_PUBKEY = "";
-var PAYEE_LUD16 = "";
+var PAYEE_LUD16 = "danish@minibits.cash";
 var relayInfo = {
   name: "0xServerless",
   description: "just getting started.\n\nBreaking the digital cage, one guide at a time.  \n#Monero \u2022 #TOR \u2022 #Nostr \u2022 #IPFS #mirrors\n\nhttps://linkfork.io/0xprivacy",
