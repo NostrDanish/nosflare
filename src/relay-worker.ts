@@ -2,7 +2,8 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { Env, NostrEvent, NostrFilter, QueryResult, NostrMessage, Nip05Response } from './types';
 import * as config from './config';
 import { RelayWebSocket } from './durable-object';
-import { isReplaceableKind, isIncomingReplaceableWinner, parseAddressableCoordinate } from './nostr-protocol';
+import { isReplaceableKind, isParameterizedReplaceableKind, isIncomingReplaceableWinner, parseAddressableCoordinate } from './nostr-protocol';
+import { isDatabaseSchemaCurrent } from './db-schema';
 
 // Import config values
 const {
@@ -105,7 +106,7 @@ async function initializeDatabase(db: D1Database): Promise<void> {
     // db_initialized only confirms that base tables were created. Older releases
     // set this flag before schema migrations completed, so never skip migrations
     // solely because this flag exists.
-    if (initCheck && initCheck.value === '1' && Number.isFinite(storedSchemaVersion) && storedSchemaVersion >= 6) {
+    if (isDatabaseSchemaCurrent(initCheck?.value, versionCheck?.value)) {
       console.log("Database schema is up to date");
       return;
     }
@@ -623,14 +624,21 @@ async function processEvent(event: NostrEvent, sessionId: string, env: Env): Pro
       }
     }
 
-    // Handle deletion events
+    // Handle deletion events before ordinary publication/tombstone checks.
     if (event.kind === 5) {
       return await processDeletionEvent(event, env);
     }
 
-    // NIP-16: Ephemeral events (kinds 20000-29999) are broadcast but never stored
+    // NIP-16: Ephemeral events (kinds 20000-29999) are broadcast but never stored.
     if (event.kind >= 20000 && event.kind < 30000) {
       return { success: true, message: "Ephemeral event broadcast" };
+    }
+
+    // NIP-09: a previously accepted deletion must prevent a deleted event from
+    // being re-published later, including events that were not present yet when
+    // the deletion request arrived.
+    if (await isEventDeleted(event, env)) {
+      return { success: false, message: "blocked: event was deleted by its author" };
     }
 
     // Save event directly to database (duplicate check happens inside saveEventToDatabase)
@@ -832,6 +840,37 @@ async function saveEventToDatabase(event: NostrEvent, env: Env): Promise<{ succe
     console.error(`Event details: ID=${event.id}, Kind=${event.kind}, Tags count=${event.tags.length}`);
     return { success: false, message: `error: ${error.message}` };
   }
+}
+
+// NIP-09 tombstone check. Deletion events are persisted in events/tags, so
+// this also blocks events that arrive after their deletion request.
+async function isEventDeleted(event: NostrEvent, env: Env): Promise<boolean> {
+  const addresses: string[] = [];
+  if (isReplaceableKind(event.kind)) {
+    addresses.push(`${event.kind}:${event.pubkey}:`);
+  } else if (isParameterizedReplaceableKind(event.kind)) {
+    const dTag = event.tags.find(tag => tag[0] === "d")?.[1] ?? "";
+    addresses.push(`${event.kind}:${event.pubkey}:${dTag}`);
+  }
+
+  const session = env.RELAY_DATABASE.withSession("first-primary");
+  const addressClause = addresses.length > 0
+    ? " OR (t.tag_name = 'a' AND t.tag_value = ?)"
+    : "";
+  const bindings: Array<string | number> = [event.pubkey, event.created_at, event.id];
+  if (addresses.length > 0) bindings.push(addresses[0]);
+
+  const deleted = await session.prepare(
+    `SELECT 1 AS deleted
+     FROM events d
+     INNER JOIN tags t ON t.event_id = d.id
+     WHERE d.kind = 5
+       AND d.pubkey = ?
+       AND d.created_at >= ?
+       AND ((t.tag_name = 'e' AND t.tag_value = ?) ${addressClause})
+     LIMIT 1`
+  ).bind(...bindings).first();
+  return deleted !== null;
 }
 
 // Delete an event and all relay-maintained rows that reference it.
