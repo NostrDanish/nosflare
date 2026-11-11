@@ -1,0 +1,32 @@
+name: Staging Nostr write-path tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - v8-staging
+    paths:
+      - "tests/staging-write-smoke.mjs"
+      - "package.json"
+      - ".github/workflows/staging-write-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  write-paths:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install --no-package-lock --no-audit --no-fund
+      - name: Test signed events, ownership, deletion and replacement
+        run: npm run smoke:staging:writes
+        env:
+          RELAY_URL: https://nosflare-0xserverless-v8.0xprivacy-online.workers.dev
