@@ -19,7 +19,8 @@ export const relayInfo: RelayInfo = {
   description: "just getting started.\n\nBreaking the digital cage, one guide at a time.  \n#Monero • #TOR • #Nostr • #IPFS #mirrors\n\nhttps://linkfork.io/0xprivacy",
   pubkey: "c45041618951bb6012ac23f5cdf3d740465f2d640be841fd9bb1d0733370cd3c",
   contact: "0xPrivacy@tmail.ae",
-  supported_nips: [1, 2, 4, 5, 9, 11, 12, 15, 16, 17, 20, 22, 23, 33, 40, 42, 50, 51, 58, 65, 71, 78, 89, 94],
+  // NIP-40 (expiration enforcement) and NIP-50 (full-text search) are omitted until implemented.
+  supported_nips: [1, 2, 4, 5, 9, 11, 12, 15, 16, 17, 20, 22, 23, 33, 42, 51, 58, 65, 71, 78, 89, 94],
   software: "https://github.com/Spl0itable/nosflare",
   version: "8.9.26",
   icon: "https://i.postimg.cc/zBBG2Nc9/photo-2026-04-14-04-39-04.jpg",
@@ -107,6 +108,24 @@ export const PAYMENT_DO_SHARDING_ENABLED = true;
 // Rate limit thresholds (sync-friendly)
 export const PUBKEY_RATE_LIMIT = { rate: 600 / 60000, capacity: 600 }; // 600 EVENT messages per min
 export const REQ_RATE_LIMIT = { rate: 300 / 60000, capacity: 300 }; // 300 REQ messages per min
+
+
+// Explicit defaults for optional subsystems.
+// Keep anti-spam and global duplicate checks disabled unless deliberately configured.
+export const enableAntiSpam = false;
+export const enableGlobalDuplicateCheck = false;
+export const antiSpamKinds = new Set<number>();
+
+// Database pruning is deliberately disabled by default. Enabling it can permanently
+// delete relay history; retention policy and protected kinds must be reviewed first.
+export const DB_PRUNING_ENABLED = false;
+export const DB_SIZE_THRESHOLD_GB = 9;
+export const DB_PRUNE_BATCH_SIZE = 1000;
+export const DB_PRUNE_TARGET_GB = 8;
+export const pruneProtectedKinds = new Set<number>([0, 3, 4, 14, 1059, 10002]);
+
+// NIP-42 AUTH event freshness window (milliseconds).
+export const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 export const excludedRateLimitKinds = new Set<number>([
   1059
 ]);
