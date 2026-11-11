@@ -44,7 +44,9 @@ __export(config_exports, {
   DB_PRUNE_TARGET_GB: () => DB_PRUNE_TARGET_GB,
   DB_PRUNING_ENABLED: () => DB_PRUNING_ENABLED,
   DB_SIZE_THRESHOLD_GB: () => DB_SIZE_THRESHOLD_GB,
+  LNURL_SERVER_PUBKEY: () => LNURL_SERVER_PUBKEY,
   MAX_TIME_WINDOWS_PER_QUERY: () => MAX_TIME_WINDOWS_PER_QUERY,
+  PAYEE_LUD16: () => PAYEE_LUD16,
   PAYMENT_DO_SHARDING_ENABLED: () => PAYMENT_DO_SHARDING_ENABLED,
   PAY_TO_RELAY_ENABLED: () => PAY_TO_RELAY_ENABLED,
   PUBKEY_RATE_LIMIT: () => PUBKEY_RATE_LIMIT,
@@ -78,6 +80,8 @@ __export(config_exports, {
 var relayNpub = "npub1c3gyzcvf2xakqy4vy06umu7hgpr97ttyp05yrlvmk8g8xvmse57qj286r6";
 var PAY_TO_RELAY_ENABLED = true;
 var RELAY_ACCESS_PRICE_SATS = 5e3;
+var LNURL_SERVER_PUBKEY = "";
+var PAYEE_LUD16 = "";
 var relayInfo = {
   name: "0xServerless",
   description: "just getting started.\n\nBreaking the digital cage, one guide at a time.  \n#Monero \u2022 #TOR \u2022 #Nostr \u2022 #IPFS #mirrors\n\nhttps://linkfork.io/0xprivacy",
@@ -2790,12 +2794,178 @@ function isDatabaseSchemaCurrent(initializedValue, schemaVersionValue) {
 }
 __name(isDatabaseSchemaCurrent, "isDatabaseSchemaCurrent");
 
+// src/zap-verification.ts
+var MAX_RECEIPT_AGE_SECONDS = 30 * 24 * 3600;
+var LNURL_PUBKEY_CACHE_TTL_MS = 60 * 60 * 1e3;
+var lnurlPubkeyCache = /* @__PURE__ */ new Map();
+async function verifyZapReceipt(event, operatorNpub, priceSats, verifyEvent, lnurlServerPubkey, payeeLud16) {
+  try {
+    if (!event || event.kind !== 9735)
+      return null;
+    const operatorHex = npubToHex(operatorNpub);
+    if (!operatorHex) {
+      console.error("Configured relayNpub is not a valid npub");
+      return null;
+    }
+    const tags = event.tags ?? [];
+    const tag = /* @__PURE__ */ __name((name) => tags.find((t) => t[0] === name && t[1])?.[1], "tag");
+    if (tag("p") !== operatorHex)
+      return null;
+    const payer = tag("P");
+    if (!payer || !/^[0-9a-f]{64}$/.test(payer))
+      return null;
+    const amountTag = tag("amount");
+    if (!amountTag || !/^\d+$/.test(amountTag))
+      return null;
+    const amountMsats = Number(amountTag);
+    if (!Number.isSafeInteger(priceSats) || priceSats <= 0 || !Number.isSafeInteger(amountMsats) || amountMsats < priceSats * 1e3)
+      return null;
+    const bolt11 = tag("bolt11");
+    if (!bolt11 || !bolt11.toLowerCase().startsWith("ln"))
+      return null;
+    const now = Math.floor(Date.now() / 1e3);
+    if (event.created_at > now + 900 || event.created_at < now - MAX_RECEIPT_AGE_SECONDS)
+      return null;
+    if (!await verifyEvent(event))
+      return null;
+    const issuerKey = await resolveLnurlServerPubkey(lnurlServerPubkey, payeeLud16);
+    if (!issuerKey || event.pubkey !== issuerKey)
+      return null;
+    return {
+      payer,
+      amountSats: Math.floor(amountMsats / 1e3),
+      receiptId: event.id,
+      bolt11
+    };
+  } catch (error) {
+    console.error("Zap receipt verification failed:", error);
+    return null;
+  }
+}
+__name(verifyZapReceipt, "verifyZapReceipt");
+async function resolveLnurlServerPubkey(directPubkey, payeeLud16) {
+  try {
+    const direct = String(directPubkey ?? "").trim().toLowerCase();
+    if (/^[0-9a-f]{64}$/.test(direct))
+      return direct;
+    const lud16 = String(payeeLud16 ?? "").trim().toLowerCase();
+    const match = /^([a-z0-9._+-]+)@([a-z0-9.-]+\.[a-z]{2,})$/.exec(lud16);
+    if (!match)
+      return null;
+    const [, name, domain] = match;
+    const now = Date.now();
+    const cached = lnurlPubkeyCache.get(lud16);
+    if (cached && cached.expiresAt > now) {
+      return cached.key;
+    }
+    const url = `https://${domain}/.well-known/lnurlp/${name}`;
+    let data = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await fetch(url, { headers: { Accept: "application/json" } });
+        if (!response.ok)
+          return null;
+        data = await response.json();
+        break;
+      } catch {
+        if (attempt === 1)
+          return null;
+      }
+    }
+    if (!data || data.allowsNostr !== true)
+      return null;
+    const nostrPubkey = String(data.nostrPubkey ?? "").trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(nostrPubkey))
+      return null;
+    lnurlPubkeyCache.set(lud16, { key: nostrPubkey, expiresAt: now + LNURL_PUBKEY_CACHE_TTL_MS });
+    return nostrPubkey;
+  } catch (error) {
+    console.error("LNURL server pubkey resolution failed:", error);
+    return null;
+  }
+}
+__name(resolveLnurlServerPubkey, "resolveLnurlServerPubkey");
+var BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+function bech32Polymod(values) {
+  const GEN = [996825010, 642813549, 513874426, 1027748829, 705979059];
+  let chk = 1;
+  for (const v of values) {
+    const top = chk >> 25;
+    chk = (chk & 33554431) << 5 ^ v;
+    for (let i = 0; i < 5; i++) {
+      if (top >> i & 1)
+        chk ^= GEN[i];
+    }
+  }
+  return chk;
+}
+__name(bech32Polymod, "bech32Polymod");
+function bech32HrpExpand(hrp) {
+  return [...hrp].map((c) => c.charCodeAt(0) >> 5).concat([0], [...hrp].map((c) => c.charCodeAt(0) & 31));
+}
+__name(bech32HrpExpand, "bech32HrpExpand");
+function bech32ConvertBits(data, fromBits, toBits, pad) {
+  let acc = 0;
+  let bits = 0;
+  const ret = [];
+  const maxv = (1 << toBits) - 1;
+  for (const value of data) {
+    if (value < 0 || value >> fromBits !== 0)
+      return null;
+    acc = acc << fromBits | value;
+    bits += fromBits;
+    while (bits >= toBits) {
+      bits -= toBits;
+      ret.push(acc >> bits & maxv);
+    }
+  }
+  if (pad) {
+    if (bits > 0)
+      ret.push(acc << toBits - bits & maxv);
+  } else if (bits >= fromBits || (acc << toBits - bits & maxv) !== 0) {
+    return null;
+  }
+  return ret;
+}
+__name(bech32ConvertBits, "bech32ConvertBits");
+function npubToHex(npub) {
+  try {
+    const value = String(npub).trim().toLowerCase();
+    const split = value.lastIndexOf("1");
+    if (split < 1 || split + 7 > value.length)
+      return null;
+    const hrp = value.slice(0, split);
+    if (hrp !== "npub")
+      return null;
+    const data = [];
+    for (const c of value.slice(split + 1)) {
+      const d = BECH32_CHARSET.indexOf(c);
+      if (d === -1)
+        return null;
+      data.push(d);
+    }
+    if (data.length < 6)
+      return null;
+    if (bech32Polymod(bech32HrpExpand(hrp).concat(data)) !== 1)
+      return null;
+    const words = bech32ConvertBits(data.slice(0, -6), 5, 8, false);
+    if (!words || words.length !== 32)
+      return null;
+    return words.map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
+}
+__name(npubToHex, "npubToHex");
+
 // src/relay-worker.ts
 var {
   relayInfo: relayInfo2,
   PAY_TO_RELAY_ENABLED: PAY_TO_RELAY_ENABLED2,
   RELAY_ACCESS_PRICE_SATS: RELAY_ACCESS_PRICE_SATS2,
   relayNpub: relayNpub2,
+  LNURL_SERVER_PUBKEY: LNURL_SERVER_PUBKEY2,
+  PAYEE_LUD16: PAYEE_LUD162,
   nip05Users: nip05Users2,
   enableAntiSpam: enableAntiSpam2,
   enableGlobalDuplicateCheck: enableGlobalDuplicateCheck2,
@@ -3139,7 +3309,7 @@ async function hasPaidForRelay(pubkey, env) {
   }
 }
 __name(hasPaidForRelay, "hasPaidForRelay");
-async function savePaidPubkey(pubkey, env) {
+async function savePaidPubkey(pubkey, env, amountSats = RELAY_ACCESS_PRICE_SATS2) {
   try {
     const session = env.RELAY_DATABASE.withSession("first-primary");
     await session.prepare(`
@@ -3148,7 +3318,7 @@ async function savePaidPubkey(pubkey, env) {
       ON CONFLICT(pubkey) DO UPDATE SET
         paid_at = excluded.paid_at,
         amount_sats = excluded.amount_sats
-    `).bind(pubkey, Math.floor(Date.now() / 1e3), RELAY_ACCESS_PRICE_SATS2).run();
+    `).bind(pubkey, Math.floor(Date.now() / 1e3), amountSats).run();
     return true;
   } catch (error) {
     console.error(`Error saving paid pubkey ${pubkey}:`, error);
@@ -4482,6 +4652,96 @@ function serveLandingPage() {
         ${PAY_TO_RELAY_ENABLED2 ? `
         // Payment handling code
         let paymentCheckInterval;
+        // Shim: the upstream nostr-zap.js bundle posts only an npub to
+        // ?notify-zap after it spots a zap receipt on public relays. The
+        // verified endpoint rejects that legacy call (no proof of payment),
+        // so swallow it here and answer success; the receipt watcher below
+        // performs the real, cryptographically verified submission.
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = function (input, init) {
+            try {
+                const reqUrl = String(typeof input === 'string' ? input : input.url);
+                if (reqUrl.indexOf('notify-zap') !== -1 && reqUrl.indexOf('npub=') !== -1) {
+                    return Promise.resolve(new Response(JSON.stringify({ success: true, pendingVerification: true }), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' }
+                    }));
+                }
+            } catch (error) {}
+            return originalFetch(input, init);
+        };
+
+        // Zap receipt submission: after the Lightning invoice is paid, the
+        // operator's LNURL server publishes a kind 9735 zap receipt to public
+        // relays. Find it and submit it to /?notify-zap, which verifies the
+        // receipt (signature, recipient, amount, bolt11, freshness) before
+        // recording the payment.
+        let receiptWatcherStarted = false;
+        const receiptSockets = [];
+
+        async function submitZapReceipts() {
+            if (receiptWatcherStarted || !window.nostr || !window.nostr.getPublicKey) return;
+            receiptWatcherStarted = true;
+
+            try {
+                const payer = await window.nostr.getPublicKey();
+                const since = Math.floor(Date.now() / 1000) - 3600;
+                const relays = ['wss://relay.damus.io', 'wss://relay.primal.net', 'wss://sendit.nosflare.com'];
+                const filter = { kinds: [9735], '#P': [payer], since: since, limit: 10 };
+                let recorded = false;
+
+                const closeAll = () => {
+                    receiptSockets.forEach((ws) => { try { ws.close(); } catch (error) {} });
+                };
+
+                const submitReceipt = async (receipt) => {
+                    if (recorded) return;
+                    try {
+                        const response = await originalFetch(window.location.origin + '?notify-zap=true', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ event: receipt })
+                        });
+                        const data = await response.json().catch(() => ({}));
+                        if (response.ok && data.success) {
+                            recorded = true;
+                            closeAll();
+                            checkPaymentStatus();
+                        }
+                    } catch (error) {
+                        console.error('Error submitting zap receipt:', error);
+                    }
+                };
+
+                relays.forEach((relayUrl) => {
+                    try {
+                        const ws = new WebSocket(relayUrl);
+                        receiptSockets.push(ws);
+                        const subId = 'zapreceipt-' + Math.random().toString(36).slice(2, 10);
+
+                        ws.onopen = () => {
+                            ws.send(JSON.stringify(['REQ', subId, filter]));
+                        };
+                        ws.onmessage = (msg) => {
+                            try {
+                                const data = JSON.parse(msg.data);
+                                if (data[0] === 'EVENT' && data[2] && data[2].kind === 9735) {
+                                    submitReceipt(data[2]);
+                                } else if (data[0] === 'EOSE') {
+                                    // Keep the subscription open briefly for live receipts.
+                                }
+                            } catch (error) {}
+                        };
+                        ws.onerror = () => { try { ws.close(); } catch (error) {} };
+
+                        setTimeout(() => { try { ws.close(); } catch (error) {} }, 60000);
+                    } catch (error) {}
+                });
+            } catch (error) {
+                console.error('Error starting zap receipt watcher:', error);
+            }
+        }
+
 
         async function checkPaymentStatus() {
             if (!window.nostr || !window.nostr.getPublicKey) return false;
@@ -4543,6 +4803,7 @@ function serveLandingPage() {
                     window.nostrZap.initTargets('#payButton');
                     
                     document.getElementById('payButton').addEventListener('click', () => {
+                        submitZapReceipts();
                         if (!paymentCheckInterval) {
                             paymentCheckInterval = setInterval(async () => {
                                 await checkPaymentStatus();
@@ -4647,36 +4908,43 @@ async function handlePaymentNotification(request, env) {
     return new Response("Method not allowed", { status: 405 });
   }
   try {
-    const url = new URL(request.url);
-    const pubkey = url.searchParams.get("npub");
-    if (!pubkey) {
-      return new Response(JSON.stringify({ error: "Missing pubkey" }), {
+    const body = await request.json();
+    const receipt = body?.event;
+    if (!receipt) {
+      return new Response(JSON.stringify({ error: "Missing zap receipt event" }), {
         status: 400,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
       });
     }
-    const success = await savePaidPubkey(pubkey, env);
+    const verified = await verifyZapReceipt(
+      receipt,
+      relayNpub2,
+      RELAY_ACCESS_PRICE_SATS2,
+      verifyEventSignature,
+      LNURL_SERVER_PUBKEY2,
+      PAYEE_LUD162
+    );
+    if (!verified) {
+      return new Response(JSON.stringify({ error: "Invalid zap receipt" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      });
+    }
+    await saveEventToDatabase(receipt, env).catch(() => void 0);
+    const success = await savePaidPubkey(verified.payer, env, verified.amountSats);
     return new Response(JSON.stringify({
       success,
+      pubkey: verified.payer,
       message: success ? "Payment recorded successfully" : "Failed to save payment"
     }), {
       status: success ? 200 : 500,
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*"
-      }
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
     });
   } catch (error) {
     console.error("Error processing payment notification:", error);
     return new Response(JSON.stringify({ error: "Invalid request" }), {
       status: 400,
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*"
-      }
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
     });
   }
 }
