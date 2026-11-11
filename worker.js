@@ -37,14 +37,21 @@ var config_exports = {};
 __export(config_exports, {
   AUTH_REQUIRED: () => AUTH_REQUIRED,
   AUTH_TIMEOUT_MS: () => AUTH_TIMEOUT_MS,
+  CONNECTION_DO_SHARDING_ENABLED: () => CONNECTION_DO_SHARDING_ENABLED,
+  CREATED_AT_LOWER_LIMIT: () => CREATED_AT_LOWER_LIMIT,
+  CREATED_AT_UPPER_LIMIT: () => CREATED_AT_UPPER_LIMIT,
   DB_PRUNE_BATCH_SIZE: () => DB_PRUNE_BATCH_SIZE,
   DB_PRUNE_TARGET_GB: () => DB_PRUNE_TARGET_GB,
   DB_PRUNING_ENABLED: () => DB_PRUNING_ENABLED,
   DB_SIZE_THRESHOLD_GB: () => DB_SIZE_THRESHOLD_GB,
+  MAX_TIME_WINDOWS_PER_QUERY: () => MAX_TIME_WINDOWS_PER_QUERY,
+  PAYMENT_DO_SHARDING_ENABLED: () => PAYMENT_DO_SHARDING_ENABLED,
   PAY_TO_RELAY_ENABLED: () => PAY_TO_RELAY_ENABLED,
   PUBKEY_RATE_LIMIT: () => PUBKEY_RATE_LIMIT,
+  READ_REPLICAS_PER_SHARD: () => READ_REPLICAS_PER_SHARD,
   RELAY_ACCESS_PRICE_SATS: () => RELAY_ACCESS_PRICE_SATS,
   REQ_RATE_LIMIT: () => REQ_RATE_LIMIT,
+  SESSION_MANAGER_SHARD_COUNT: () => SESSION_MANAGER_SHARD_COUNT,
   allowedEventKinds: () => allowedEventKinds,
   allowedNip05Domains: () => allowedNip05Domains,
   allowedPubkeys: () => allowedPubkeys,
@@ -68,198 +75,45 @@ __export(config_exports, {
   relayInfo: () => relayInfo,
   relayNpub: () => relayNpub
 });
-var relayNpub = "npub16jdfqgazrkapk0yrqm9rdxlnys7ck39c7zmdzxtxqlmmpxg04r0sd733sv";
+var relayNpub = "npub1c3gyzcvf2xakqy4vy06umu7hgpr97ttyp05yrlvmk8g8xvmse57qj286r6";
 var PAY_TO_RELAY_ENABLED = true;
-var RELAY_ACCESS_PRICE_SATS = 212121;
-var AUTH_REQUIRED = true;
-var AUTH_TIMEOUT_MS = 6e5;
+var RELAY_ACCESS_PRICE_SATS = 5e3;
 var relayInfo = {
-  name: "Nosflare",
-  description: "A serverless Nostr relay through Cloudflare Worker and D1 database",
-  pubkey: "d49a9023a21dba1b3c8306ca369bf3243d8b44b8f0b6d1196607f7b0990fa8df",
-  contact: "lux@fed.wtf",
-  supported_nips: [1, 2, 4, 5, 9, 11, 12, 13, 15, 16, 17, 20, 22, 25, 28, 33, 40, 42, 57],
-  software: "https://github.com/Spl0itable/nosflare",
-  version: "7.9.45",
-  icon: "https://raw.githubusercontent.com/Spl0itable/nosflare/main/images/flare.png",
-  // Optional fields (uncomment as needed):
-  // banner: "https://example.com/banner.jpg",
-  // privacy_policy: "https://example.com/privacy-policy.html",
-  // terms_of_service: "https://example.com/terms.html",
+  name: "0xServerless",
+  description: "just getting started.\n\nBreaking the digital cage, one guide at a time.  \n#Monero \u2022 #TOR \u2022 #Nostr \u2022 #IPFS #mirrors\n\nhttps://linkfork.io/0xprivacy",
+  pubkey: "c45041618951bb6012ac23f5cdf3d740465f2d640be841fd9bb1d0733370cd3c",
+  contact: "0xPrivacy@tmail.ae",
+  // NIP-40 (expiration enforcement) and NIP-50 (full-text search) are omitted until implemented.
+  supported_nips: [1, 2, 4, 5, 9, 11, 12, 15, 16, 17, 20, 22, 23, 33, 42, 51, 58, 65, 71, 78, 89, 94],
+  software: "https://github.com/NostrDanish/nosflare",
+  version: "8.9.27",
+  icon: "https://i.postimg.cc/zBBG2Nc9/photo-2026-04-14-04-39-04.jpg",
+  banner: "https://i.postimg.cc/cCv6CW7S/photo-2026-04-14-04-38-19.jpg",
   // Relay limitations
   limitation: {
-    // max_message_length: 524288, // 512KB
-    // max_subscriptions: 300,
-    // max_limit: 10000,
-    // max_subid_length: 256,
-    // max_event_tags: 2000,
-    // max_content_length: 70000,
+    max_message_length: 1048576,
+    // 1MB (Cloudflare WS hard cap)
+    max_subscriptions: 500,
+    max_limit: 1e4,
+    max_subid_length: 256,
+    max_event_tags: 5e3,
+    max_content_length: 7e4,
     // min_pow_difficulty: 0,
-    auth_required: AUTH_REQUIRED,
+    auth_required: false,
+    // Set to true to enable NIP-42 authentication
     payment_required: PAY_TO_RELAY_ENABLED,
-    restricted_writes: PAY_TO_RELAY_ENABLED
-    // created_at_lower_limit: 0,
-    // created_at_upper_limit: 2147483647,
+    restricted_writes: PAY_TO_RELAY_ENABLED,
+    created_at_lower_limit: 946684800,
+    // January 1, 2000
+    created_at_upper_limit: 2147483647
+    // Max unix timestamp (year 2038)
     // default_limit: 10000
   }
-  // Event retention policies (uncomment and configure as needed):
-  // retention: [
-  //   { kinds: [0, 1, [5, 7], [40, 49]], time: 3600 },
-  //   { kinds: [[40000, 49999]], time: 100 },
-  //   { kinds: [[30000, 39999]], count: 1000 },
-  //   { time: 3600, count: 10000 }
-  // ],
-  // Content limitations by country (uncomment as needed):
-  // relay_countries: ["*"], // Use ["US", "CA", "EU"] for specific countries, ["*"] for global
-  // Community preferences (uncomment as needed):
-  // language_tags: ["en", "en-419"], // IETF language tags, use ["*"] for all languages
-  // tags: ["sfw-only", "bitcoin-only", "anime"], // Community/content tags
-  // posting_policy: "https://example.com/posting-policy.html",
-  // Payment configuration (added dynamically in handleRelayInfoRequest if PAY_TO_RELAY_ENABLED):
-  // payments_url: "https://my-relay/payments",
-  // fees: {
-  //   admission: [{ amount: 1000000, unit: "msats" }],
-  //   subscription: [{ amount: 5000000, unit: "msats", period: 2592000 }],
-  //   publication: [{ kinds: [4], amount: 100, unit: "msats" }],
-  // }
 };
 var nip05Users = {
-  "Luxas": "d49a9023a21dba1b3c8306ca369bf3243d8b44b8f0b6d1196607f7b0990fa8df"
+  "0xPrivacy": "c45041618951bb6012ac23f5cdf3d740465f2d640be841fd9bb1d0733370cd3c"
   // ... more NIP-05 verified users
 };
-var enableAntiSpam = false;
-var enableGlobalDuplicateCheck = false;
-var antiSpamKinds = /* @__PURE__ */ new Set([
-  0,
-  1,
-  2,
-  3,
-  4,
-  5,
-  6,
-  7,
-  8,
-  9,
-  10,
-  11,
-  12,
-  13,
-  14,
-  16,
-  17,
-  40,
-  41,
-  42,
-  43,
-  44,
-  64,
-  818,
-  1021,
-  1022,
-  1040,
-  1059,
-  1063,
-  1311,
-  1617,
-  1621,
-  1622,
-  1630,
-  1633,
-  1971,
-  1984,
-  1985,
-  1986,
-  1987,
-  2003,
-  2004,
-  2022,
-  4550,
-  5e3,
-  5999,
-  6e3,
-  6999,
-  7e3,
-  9e3,
-  9030,
-  9041,
-  9467,
-  9734,
-  9735,
-  9802,
-  1e4,
-  10001,
-  10002,
-  10003,
-  10004,
-  10005,
-  10006,
-  10007,
-  10009,
-  10015,
-  10030,
-  10050,
-  10063,
-  10096,
-  13194,
-  21e3,
-  22242,
-  23194,
-  23195,
-  24133,
-  24242,
-  27235,
-  3e4,
-  30001,
-  30002,
-  30003,
-  30004,
-  30005,
-  30007,
-  30008,
-  30009,
-  30015,
-  30017,
-  30018,
-  30019,
-  30020,
-  30023,
-  30024,
-  30030,
-  30040,
-  30041,
-  30063,
-  30078,
-  30311,
-  30315,
-  30402,
-  30403,
-  30617,
-  30618,
-  30818,
-  30819,
-  31890,
-  31922,
-  31923,
-  31924,
-  31925,
-  31989,
-  31990,
-  34235,
-  34236,
-  34237,
-  34550,
-  39e3,
-  39001,
-  39002,
-  39003,
-  39004,
-  39005,
-  39006,
-  39007,
-  39008,
-  39009
-  // Add other kinds you want to check for duplicates
-]);
 var blockedPubkeys = /* @__PURE__ */ new Set([
   "3c7f5948b5d80900046a67d8e3bf4971d6cba013abece1dd542eca223cf3dd3f",
   "fed5c0c3c8fe8f51629a0b39951acdf040fd40f53a327ae79ee69991176ba058",
@@ -267,53 +121,41 @@ var blockedPubkeys = /* @__PURE__ */ new Set([
   "05aee96dd41429a3ae97a9dac4dfc6867fdfacebca3f3bdc051e5004b0751f01",
   "53a756bb596055219d93e888f71d936ec6c47d960320476c955efd8941af4362"
 ]);
-var allowedPubkeys = /* @__PURE__ */ new Set([
-  // ... pubkeys that are explicitly allowed
-]);
+var allowedPubkeys = /* @__PURE__ */ new Set([]);
 var blockedEventKinds = /* @__PURE__ */ new Set([
   1064
 ]);
-var allowedEventKinds = /* @__PURE__ */ new Set([
-  // ... kinds that are explicitly allowed
-]);
+var allowedEventKinds = /* @__PURE__ */ new Set([]);
 var blockedContent = /* @__PURE__ */ new Set([
   "~~ hello world! ~~"
-  // ... more blocked content
 ]);
 var checkValidNip05 = false;
-var blockedNip05Domains = /* @__PURE__ */ new Set([
-  // Add domains that are explicitly blocked
-  // "primal.net"
-]);
-var allowedNip05Domains = /* @__PURE__ */ new Set([
-  // Add domains that are explicitly allowed
-  // Leave empty to allow all domains (unless blocked)
-]);
-var blockedTags = /* @__PURE__ */ new Set([
-  // ... tags that are explicitly blocked
-]);
-var allowedTags = /* @__PURE__ */ new Set([
-  // "p", "e", "t"
-  // ... tags that are explicitly allowed
-]);
-var PUBKEY_RATE_LIMIT = { rate: 10 / 6e4, capacity: 10 };
-var REQ_RATE_LIMIT = { rate: 50 / 6e4, capacity: 50 };
-var excludedRateLimitKinds = /* @__PURE__ */ new Set([
-  1059
-  // ... kinds to exclude from EVENT rate limiting Ex: 1, 2, 3
-]);
-var DB_PRUNING_ENABLED = true;
+var blockedNip05Domains = /* @__PURE__ */ new Set([]);
+var allowedNip05Domains = /* @__PURE__ */ new Set([]);
+var blockedTags = /* @__PURE__ */ new Set([]);
+var allowedTags = /* @__PURE__ */ new Set([]);
+var CONNECTION_DO_SHARDING_ENABLED = true;
+var SESSION_MANAGER_SHARD_COUNT = 5;
+var MAX_TIME_WINDOWS_PER_QUERY = 30;
+var READ_REPLICAS_PER_SHARD = 2;
+var PAYMENT_DO_SHARDING_ENABLED = true;
+var PUBKEY_RATE_LIMIT = { rate: 600 / 6e4, capacity: 600 };
+var REQ_RATE_LIMIT = { rate: 300 / 6e4, capacity: 300 };
+var enableAntiSpam = false;
+var enableGlobalDuplicateCheck = false;
+var antiSpamKinds = /* @__PURE__ */ new Set();
+var DB_PRUNING_ENABLED = false;
 var DB_SIZE_THRESHOLD_GB = 9;
 var DB_PRUNE_BATCH_SIZE = 1e3;
 var DB_PRUNE_TARGET_GB = 8;
-var pruneProtectedKinds = /* @__PURE__ */ new Set([
-  0,
-  // Profile metadata
-  3,
-  // Contact list / follows
-  10002
-  // Relay list metadata
+var pruneProtectedKinds = /* @__PURE__ */ new Set([0, 3, 4, 14, 1059, 10002]);
+var AUTH_TIMEOUT_MS = 5 * 60 * 1e3;
+var excludedRateLimitKinds = /* @__PURE__ */ new Set([
+  1059
 ]);
+var CREATED_AT_LOWER_LIMIT = relayInfo.limitation?.created_at_lower_limit ?? 0;
+var CREATED_AT_UPPER_LIMIT = relayInfo.limitation?.created_at_upper_limit ?? 2147483647;
+var AUTH_REQUIRED = relayInfo.limitation?.auth_required ?? false;
 function isPubkeyAllowed(pubkey) {
   if (allowedPubkeys.size > 0 && !allowedPubkeys.has(pubkey)) {
     return false;
@@ -2905,6 +2747,49 @@ var schnorr = /* @__PURE__ */ (() => {
   };
 })();
 
+// src/nostr-protocol.ts
+function isReplaceableKind(kind) {
+  return kind === 0 || kind === 3 || kind >= 1e4 && kind < 2e4;
+}
+__name(isReplaceableKind, "isReplaceableKind");
+function isParameterizedReplaceableKind(kind) {
+  return kind >= 3e4 && kind < 4e4;
+}
+__name(isParameterizedReplaceableKind, "isParameterizedReplaceableKind");
+function isIncomingReplaceableWinner(incomingCreatedAt, incomingId, existingCreatedAt, existingId) {
+  return incomingCreatedAt > existingCreatedAt || incomingCreatedAt === existingCreatedAt && incomingId < existingId;
+}
+__name(isIncomingReplaceableWinner, "isIncomingReplaceableWinner");
+function parseAddressableCoordinate(value, deletingPubkey) {
+  const first = value.indexOf(":");
+  const second = first < 0 ? -1 : value.indexOf(":", first + 1);
+  if (first <= 0 || second < 0)
+    return null;
+  const kindText = value.slice(0, first);
+  const pubkey = value.slice(first + 1, second);
+  const dTag = value.slice(second + 1);
+  if (!/^\d+$/.test(kindText) || !/^[0-9a-f]{64}$/.test(pubkey))
+    return null;
+  const kind = Number(kindText);
+  if (!Number.isSafeInteger(kind) || kind < 0 || kind > 65535)
+    return null;
+  if (pubkey !== deletingPubkey)
+    return null;
+  if (!isReplaceableKind(kind) && !isParameterizedReplaceableKind(kind))
+    return null;
+  if (isReplaceableKind(kind) && dTag !== "")
+    return null;
+  return { kind, pubkey, dTag };
+}
+__name(parseAddressableCoordinate, "parseAddressableCoordinate");
+
+// src/db-schema.ts
+function isDatabaseSchemaCurrent(initializedValue, schemaVersionValue) {
+  const version = Number(schemaVersionValue ?? 0);
+  return initializedValue === "1" && Number.isFinite(version) && version >= 6;
+}
+__name(isDatabaseSchemaCurrent, "isDatabaseSchemaCurrent");
+
 // src/relay-worker.ts
 var {
   relayInfo: relayInfo2,
@@ -2927,6 +2812,17 @@ var {
 var GLOBAL_MAX_EVENTS = 500;
 var MAX_QUERY_COMPLEXITY = 1e3;
 var CHUNK_SIZE = 500;
+var databaseInitialization = null;
+function ensureDatabaseInitialized(db) {
+  if (!databaseInitialization) {
+    databaseInitialization = initializeDatabase(db).catch((error) => {
+      databaseInitialization = null;
+      throw error;
+    });
+  }
+  return databaseInitialization;
+}
+__name(ensureDatabaseInitialized, "ensureDatabaseInitialized");
 async function initializeDatabase(db) {
   const dropSession = db.withSession("first-primary");
   try {
@@ -2988,8 +2884,12 @@ async function initializeDatabase(db) {
     const initCheck = await dropSession.prepare(
       "SELECT value FROM system_config WHERE key = 'db_initialized' LIMIT 1"
     ).first().catch(() => null);
-    if (initCheck && initCheck.value === "1") {
-      console.log("Database already initialized");
+    const versionCheck = await dropSession.prepare(
+      "SELECT value FROM system_config WHERE key = 'schema_version' LIMIT 1"
+    ).first().catch(() => null);
+    const storedSchemaVersion = versionCheck ? Number(versionCheck.value) : 0;
+    if (isDatabaseSchemaCurrent(initCheck?.value, versionCheck?.value)) {
+      console.log("Database schema is up to date");
       return;
     }
   } catch (error) {
@@ -3423,11 +3323,14 @@ async function processEvent(event, sessionId, env) {
         return { success: false, message: "invalid: NIP-05 validation failed" };
       }
     }
-    if (event.kind === 5) {
-      return await processDeletionEvent(event, env);
-    }
     if (event.kind >= 2e4 && event.kind < 3e4) {
       return { success: true, message: "Ephemeral event broadcast" };
+    }
+    if (await isEventDeleted(event, env)) {
+      return { success: false, message: "blocked: event was deleted by its author" };
+    }
+    if (event.kind === 5) {
+      return await processDeletionEvent(event, env);
     }
     return await saveEventToDatabase(event, env);
   } catch (error) {
@@ -3449,43 +3352,29 @@ async function saveEventToDatabase(event, env) {
     if (existingEvent) {
       return { success: false, message: "duplicate: event already exists", bookmark: session.getBookmark() ?? void 0 };
     }
-    const isReplaceable = event.kind === 0 || event.kind === 3 || event.kind >= 1e4 && event.kind < 2e4;
-    if (isReplaceable) {
+    if (isReplaceableKind(event.kind)) {
       const existing = await session.prepare(
-        "SELECT id, created_at FROM events WHERE kind = ? AND pubkey = ? LIMIT 1"
-      ).bind(event.kind, event.pubkey).first();
-      if (existing) {
-        if (event.created_at <= existing.created_at) {
-          return { success: false, message: "duplicate: a newer or equal replaceable event already exists", bookmark: session.getBookmark() ?? void 0 };
-        }
-        const oldId = existing.id;
-        await session.batch([
-          session.prepare("DELETE FROM tags WHERE event_id = ?").bind(oldId),
-          session.prepare("DELETE FROM content_hashes WHERE event_id = ?").bind(oldId),
-          session.prepare("DELETE FROM event_tags_cache_multi WHERE event_id = ?").bind(oldId),
-          session.prepare("DELETE FROM events WHERE id = ?").bind(oldId)
-        ]);
-        console.log(`Replaced older event ${oldId} with newer event ${event.id} (kind ${event.kind})`);
+        "SELECT id, created_at FROM events WHERE kind = ? AND pubkey = ?"
+      ).bind(event.kind, event.pubkey).all();
+      const existingRows = existing.results;
+      if (existingRows.some((row) => !isIncomingReplaceableWinner(event.created_at, event.id, row.created_at, row.id))) {
+        return { success: false, message: "duplicate: a newer or preferred replaceable event already exists", bookmark: session.getBookmark() ?? void 0 };
+      }
+      if (existingRows.length > 0) {
+        await deleteStoredEvents(session, existingRows.map((row) => row.id));
       }
     }
-    const isParameterizedReplaceable = event.kind >= 3e4 && event.kind < 4e4;
-    if (isParameterizedReplaceable) {
-      const dTag = event.tags.find((t) => t[0] === "d")?.[1] || "";
+    if (event.kind >= 3e4 && event.kind < 4e4) {
+      const dTag = event.tags.find((t) => t[0] === "d")?.[1] ?? "";
       const existing = await session.prepare(
-        "SELECT id, created_at FROM events WHERE kind = ? AND pubkey = ? AND tag_d = ? LIMIT 1"
-      ).bind(event.kind, event.pubkey, dTag).first();
-      if (existing) {
-        if (event.created_at <= existing.created_at) {
-          return { success: false, message: "duplicate: a newer or equal parameterized replaceable event already exists", bookmark: session.getBookmark() ?? void 0 };
-        }
-        const oldId = existing.id;
-        await session.batch([
-          session.prepare("DELETE FROM tags WHERE event_id = ?").bind(oldId),
-          session.prepare("DELETE FROM content_hashes WHERE event_id = ?").bind(oldId),
-          session.prepare("DELETE FROM event_tags_cache_multi WHERE event_id = ?").bind(oldId),
-          session.prepare("DELETE FROM events WHERE id = ?").bind(oldId)
-        ]);
-        console.log(`Replaced older parameterized event ${oldId} with newer event ${event.id} (kind ${event.kind}, d=${dTag})`);
+        "SELECT id, created_at FROM events WHERE kind = ? AND pubkey = ? AND COALESCE(tag_d, '') = ?"
+      ).bind(event.kind, event.pubkey, dTag).all();
+      const existingRows = existing.results;
+      if (existingRows.some((row) => !isIncomingReplaceableWinner(event.created_at, event.id, row.created_at, row.id))) {
+        return { success: false, message: "duplicate: a newer or preferred parameterized replaceable event already exists", bookmark: session.getBookmark() ?? void 0 };
+      }
+      if (existingRows.length > 0) {
+        await deleteStoredEvents(session, existingRows.map((row) => row.id));
       }
     }
     let contentHash = null;
@@ -3520,8 +3409,8 @@ async function saveEventToDatabase(event, env) {
           tagA = tag[1];
         if (tag[0] === "t" && !tagT)
           tagT = tag[1];
-        if (tag[0] === "d" && !tagD)
-          tagD = tag[1];
+        if (tag[0] === "d" && tagD === null)
+          tagD = tag[1] ?? "";
         if (tag[0] === "r" && !tagR)
           tagR = tag[1];
         if (tag[0] === "L" && !tagL)
@@ -3606,72 +3495,97 @@ async function saveEventToDatabase(event, env) {
   }
 }
 __name(saveEventToDatabase, "saveEventToDatabase");
+async function isEventDeleted(event, env) {
+  const addresses = [];
+  if (isReplaceableKind(event.kind)) {
+    addresses.push(`${event.kind}:${event.pubkey}:`);
+  } else if (isParameterizedReplaceableKind(event.kind)) {
+    const dTag = event.tags.find((tag) => tag[0] === "d")?.[1] ?? "";
+    addresses.push(`${event.kind}:${event.pubkey}:${dTag}`);
+  }
+  const session = env.RELAY_DATABASE.withSession("first-primary");
+  const addressClause = addresses.length > 0 ? " OR (t.tag_name = 'a' AND t.tag_value = ?)" : "";
+  const bindings = [event.pubkey, event.created_at, event.id];
+  if (addresses.length > 0)
+    bindings.push(addresses[0]);
+  const deleted = await session.prepare(
+    `SELECT 1 AS deleted
+     FROM events d
+     INNER JOIN tags t ON t.event_id = d.id
+     WHERE d.kind = 5
+       AND d.pubkey = ?
+       AND d.created_at >= ?
+       AND ((t.tag_name = 'e' AND t.tag_value = ?) ${addressClause})
+     LIMIT 1`
+  ).bind(...bindings).first();
+  return deleted !== null;
+}
+__name(isEventDeleted, "isEventDeleted");
+async function deleteStoredEvents(session, eventIds) {
+  const uniqueIds = [...new Set(eventIds)];
+  for (let offset = 0; offset < uniqueIds.length; offset += 25) {
+    const statements = [];
+    for (const eventId of uniqueIds.slice(offset, offset + 25)) {
+      statements.push(
+        session.prepare("DELETE FROM tags WHERE event_id = ?").bind(eventId),
+        session.prepare("DELETE FROM content_hashes WHERE event_id = ?").bind(eventId),
+        session.prepare("DELETE FROM event_tags_cache_multi WHERE event_id = ?").bind(eventId),
+        session.prepare("DELETE FROM events WHERE id = ?").bind(eventId)
+      );
+    }
+    await session.batch(statements);
+  }
+}
+__name(deleteStoredEvents, "deleteStoredEvents");
 async function processDeletionEvent(event, env) {
   console.log(`Processing deletion event ${event.id}`);
-  const deletedEventIds = event.tags.filter((tag) => tag[0] === "e").map((tag) => tag[1]);
   const session = env.RELAY_DATABASE.withSession("first-primary");
-  if (deletedEventIds.length === 0) {
-    return { success: true, message: "No events to delete", bookmark: session.getBookmark() ?? void 0 };
+  const deletedIds = /* @__PURE__ */ new Set();
+  const eventIds = [...new Set(event.tags.filter((tag) => tag[0] === "e" && typeof tag[1] === "string" && /^[0-9a-f]{64}$/i.test(tag[1])).map((tag) => tag[1].toLowerCase()))];
+  for (let offset = 0; offset < eventIds.length; offset += 80) {
+    const chunk = eventIds.slice(offset, offset + 80);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await session.prepare(
+      `SELECT id FROM events WHERE pubkey = ? AND created_at <= ? AND id IN (${placeholders})`
+    ).bind(event.pubkey, event.created_at, ...chunk).all();
+    for (const row of result.results)
+      deletedIds.add(row.id);
   }
-  let deletedCount = 0;
-  const errors = [];
-  const idsToDelete = [];
-  if (deletedEventIds.length > 0) {
-    try {
-      const ownerPlaceholders = deletedEventIds.map(() => "?").join(",");
-      const ownerResult = await session.prepare(
-        `SELECT id, pubkey FROM events WHERE id IN (${ownerPlaceholders})`
-      ).bind(...deletedEventIds).all();
-      const eventOwners = /* @__PURE__ */ new Map();
-      for (const row of ownerResult.results) {
-        eventOwners.set(row.id, row.pubkey);
-      }
-      for (const eventId of deletedEventIds) {
-        const ownerPubkey = eventOwners.get(eventId);
-        if (!ownerPubkey) {
-          console.warn(`Event ${eventId} not found in D1. Nothing to delete (may be in queue).`);
-          continue;
-        }
-        if (ownerPubkey !== event.pubkey) {
-          console.warn(`Event ${eventId} does not belong to pubkey ${event.pubkey}. Skipping deletion.`);
-          errors.push(`unauthorized: cannot delete event ${eventId} - wrong pubkey`);
-          continue;
-        }
-        idsToDelete.push(eventId);
-      }
-    } catch (error) {
-      console.error("Error checking event ownership:", error);
-      errors.push("error checking event ownership");
-    }
+  const coordinates = /* @__PURE__ */ new Map();
+  for (const tag of event.tags) {
+    if (tag[0] !== "a" || typeof tag[1] !== "string")
+      continue;
+    const coordinate = parseAddressableCoordinate(tag[1], event.pubkey);
+    if (coordinate)
+      coordinates.set(`${coordinate.kind}:${coordinate.pubkey}:${coordinate.dTag}`, coordinate);
   }
+  const coordinateList = [...coordinates.values()];
+  for (let offset = 0; offset < coordinateList.length; offset += 40) {
+    const chunk = coordinateList.slice(offset, offset + 40);
+    if (chunk.length === 0)
+      continue;
+    const predicates = chunk.map(() => "(kind = ? AND COALESCE(tag_d, '') = ?)").join(" OR ");
+    const bindings = [event.pubkey, event.created_at];
+    for (const coordinate of chunk)
+      bindings.push(coordinate.kind, coordinate.dTag);
+    const result = await session.prepare(
+      `SELECT id FROM events WHERE pubkey = ? AND created_at <= ? AND (${predicates})`
+    ).bind(...bindings).all();
+    for (const row of result.results)
+      deletedIds.add(row.id);
+  }
+  const idsToDelete = [...deletedIds];
   if (idsToDelete.length > 0) {
-    try {
-      const deleteStatements = [];
-      for (const eventId of idsToDelete) {
-        deleteStatements.push(
-          session.prepare("DELETE FROM tags WHERE event_id = ?").bind(eventId),
-          session.prepare("DELETE FROM content_hashes WHERE event_id = ?").bind(eventId),
-          session.prepare("DELETE FROM event_tags_cache_multi WHERE event_id = ?").bind(eventId),
-          session.prepare("DELETE FROM events WHERE id = ?").bind(eventId)
-        );
-      }
-      for (let i = 0; i < deleteStatements.length; i += 100) {
-        await session.batch(deleteStatements.slice(i, i + 100));
-      }
-      deletedCount = idsToDelete.length;
-      console.log(`Batch deleted ${deletedCount} events from D1.`);
-    } catch (error) {
-      console.error("Error batch deleting events:", error);
-      errors.push("error batch deleting events");
-    }
+    await deleteStoredEvents(session, idsToDelete);
+    console.log(`NIP-09 deleted ${idsToDelete.length} event(s) for author ${event.pubkey}`);
   }
   const saveResult = await saveEventToDatabase(event, env);
-  if (errors.length > 0) {
-    return { success: false, message: errors[0], bookmark: saveResult.bookmark ?? (session.getBookmark() ?? void 0) };
+  if (!saveResult.success && !saveResult.message.startsWith("duplicate:")) {
+    return { success: false, message: saveResult.message, bookmark: saveResult.bookmark ?? (session.getBookmark() ?? void 0) };
   }
   return {
     success: true,
-    message: deletedCount > 0 ? `Successfully deleted ${deletedCount} event(s)` : "No matching events found to delete",
+    message: idsToDelete.length > 0 ? `Successfully deleted ${idsToDelete.length} event(s)` : "Deletion request recorded; no matching events found",
     bookmark: saveResult.bookmark ?? (session.getBookmark() ?? void 0)
   };
 }
@@ -5146,6 +5060,7 @@ __name(pruneOldEvents, "pruneOldEvents");
 var relay_worker_default = {
   async fetch(request, env, ctx) {
     try {
+      await ensureDatabaseInitialized(env.RELAY_DATABASE);
       const url = new URL(request.url);
       if (request.method === "POST" && url.searchParams.has("notify-zap") && PAY_TO_RELAY_ENABLED2) {
         return await handlePaymentNotification(request, env);
@@ -5167,9 +5082,6 @@ var relay_worker_default = {
         } else if (request.headers.get("Accept") === "application/nostr+json") {
           return handleRelayInfoRequest(request);
         } else {
-          ctx.waitUntil(
-            initializeDatabase(env.RELAY_DATABASE).catch((e) => console.error("DB init error:", e))
-          );
           return serveLandingPage();
         }
       } else if (url.pathname === "/.well-known/nostr.json") {
@@ -5188,6 +5100,7 @@ var relay_worker_default = {
   async scheduled(event, env, ctx) {
     console.log("Running scheduled 24hr database maintenance...");
     try {
+      await ensureDatabaseInitialized(env.RELAY_DATABASE);
       const session = env.RELAY_DATABASE.withSession("first-primary");
       if (DB_PRUNING_ENABLED2) {
         const currentSizeBytes = await getDatabaseSizeBytes(session);
