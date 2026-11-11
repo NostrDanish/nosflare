@@ -624,21 +624,19 @@ async function processEvent(event: NostrEvent, sessionId: string, env: Env): Pro
       }
     }
 
-    // Handle deletion events before ordinary publication/tombstone checks.
-    if (event.kind === 5) {
-      return await processDeletionEvent(event, env);
-    }
-
     // NIP-16: Ephemeral events (kinds 20000-29999) are broadcast but never stored.
     if (event.kind >= 20000 && event.kind < 30000) {
       return { success: true, message: "Ephemeral event broadcast" };
     }
 
     // NIP-09: a previously accepted deletion must prevent a deleted event from
-    // being re-published later, including events that were not present yet when
-    // the deletion request arrived.
+    // being re-published later, including deletion events themselves.
     if (await isEventDeleted(event, env)) {
       return { success: false, message: "blocked: event was deleted by its author" };
+    }
+
+    if (event.kind === 5) {
+      return await processDeletionEvent(event, env);
     }
 
     // Save event directly to database (duplicate check happens inside saveEventToDatabase)
