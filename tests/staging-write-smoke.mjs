@@ -19,12 +19,7 @@ async function makeEvent(secretKey, kind, tags, content, createdAt) {
   const serialized = JSON.stringify([0, pubkey, createdAt, kind, tags, content]);
   const idBytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(serialized)));
   return {
-    id: toHex(idBytes),
-    pubkey,
-    created_at: createdAt,
-    kind,
-    tags,
-    content,
+    id: toHex(idBytes), pubkey, created_at: createdAt, kind, tags, content,
     sig: toHex(schnorr.sign(idBytes, secretKey)),
   };
 }
@@ -52,6 +47,26 @@ function waitForFrame(socket, predicate, timeoutMs = 20000) {
     socket.addEventListener("message", onMessage);
     socket.addEventListener("error", onError);
   });
+}
+
+async function connectAndAuth(secretKey) {
+  const socket = new WebSocket(wsUrl);
+  const challengePromise = waitForFrame(socket, frame => frame[0] === "AUTH");
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("WebSocket connection timed out")), 15000);
+    socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+    socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("Could not connect to staging relay WebSocket")); }, { once: true });
+  });
+  const challenge = await challengePromise;
+  const authEvent = await makeEvent(secretKey, 22242, [
+    ["relay", wsUrl],
+    ["challenge", challenge[1]],
+  ], "", Math.floor(Date.now() / 1000));
+  const authResultPromise = waitForFrame(socket, frame => frame[0] === "OK" && frame[1] === authEvent.id);
+  socket.send(JSON.stringify(["AUTH", authEvent]));
+  const authResult = await authResultPromise;
+  assert.equal(authResult[2], true, `NIP-42 AUTH failed: ${authResult[3]}`);
+  return socket;
 }
 
 async function publish(socket, event, expectedAccepted) {
@@ -86,38 +101,34 @@ async function queryById(socket, id) {
   });
 }
 
-const socket = new WebSocket(wsUrl);
-await new Promise((resolve, reject) => {
-  const timer = setTimeout(() => reject(new Error("WebSocket connection timed out")), 15000);
-  socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
-  socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("Could not connect to staging relay WebSocket")); }, { once: true });
-});
+const socket1 = await connectAndAuth(secret1);
+const socket2 = await connectAndAuth(secret2);
 
 try {
   const now = Math.floor(Date.now() / 1000) + 2;
 
   // Ownership: another pubkey's deletion request must not delete this event.
   const foreignTarget = await makeEvent(secret2, 1, [], "staging ownership test", now);
-  await publish(socket, foreignTarget, true);
+  await publish(socket2, foreignTarget, true);
   const foreignDelete = await makeEvent(secret1, 5, [["e", foreignTarget.id]], "", now + 1);
-  await publish(socket, foreignDelete, true);
-  assert.equal((await queryById(socket, foreignTarget.id)).length, 1, "foreign author must not delete another author's event");
+  await publish(socket1, foreignDelete, true);
+  assert.equal((await queryById(socket2, foreignTarget.id)).length, 1, "foreign author must not delete another author's event");
 
   // NIP-09 e-tag deletion, including prevention of later re-publication.
   const ownDelete = await makeEvent(secret2, 5, [["e", foreignTarget.id]], "", now + 2);
-  await publish(socket, ownDelete, true);
-  assert.equal((await queryById(socket, foreignTarget.id)).length, 0, "NIP-09 e-tag target should be removed");
-  const republishE = await publish(socket, foreignTarget, false);
+  await publish(socket2, ownDelete, true);
+  assert.equal((await queryById(socket2, foreignTarget.id)).length, 0, "NIP-09 e-tag target should be removed");
+  const republishE = await publish(socket2, foreignTarget, false);
   assert.match(String(republishE[3]), /deleted/i, "deleted e-tag event must not be resurrected");
 
   // NIP-09 a-tag deletion for a parameterized replaceable event.
   const dTag = `stage:article:${now}`;
   const article = await makeEvent(secret1, 30023, [["d", dTag]], "staging addressable deletion test", now + 3);
-  await publish(socket, article, true);
+  await publish(socket1, article, true);
   const deleteAddress = await makeEvent(secret1, 5, [["a", `30023:${pubkey1}:${dTag}`]], "", now + 4);
-  await publish(socket, deleteAddress, true);
-  assert.equal((await queryById(socket, article.id)).length, 0, "NIP-09 a-tag target should be removed");
-  const republishA = await publish(socket, article, false);
+  await publish(socket1, deleteAddress, true);
+  assert.equal((await queryById(socket1, article.id)).length, 0, "NIP-09 a-tag target should be removed");
+  const republishA = await publish(socket1, article, false);
   assert.match(String(republishA[3]), /deleted/i, "deleted a-tag event must not be resurrected");
 
   // NIP-01 replaceable tie-break: equal timestamps retain the lower event id.
@@ -125,29 +136,30 @@ try {
   const tieB = await makeEvent(secret1, 10001, [], "replaceable-B", now + 5);
   const winner = tieA.id < tieB.id ? tieA : tieB;
   const loser = winner === tieA ? tieB : tieA;
-  await publish(socket, winner, true);
-  await publish(socket, loser, false);
-  assert.equal((await queryById(socket, winner.id)).length, 1, "preferred replaceable event should remain");
-  assert.equal((await queryById(socket, loser.id)).length, 0, "non-winning replaceable event should not be stored");
+  await publish(socket1, winner, true);
+  await publish(socket1, loser, false);
+  assert.equal((await queryById(socket1, winner.id)).length, 1, "preferred replaceable event should remain");
+  assert.equal((await queryById(socket1, loser.id)).length, 0, "non-winning replaceable event should not be stored");
 
   // NIP-33 replacement by (kind, pubkey, d-tag).
   const replaceD = `stage:replace:${now}`;
   const newer = await makeEvent(secret1, 30023, [["d", replaceD]], "newer version", now + 7);
   const older = await makeEvent(secret1, 30023, [["d", replaceD]], "older version", now + 6);
-  await publish(socket, newer, true);
-  await publish(socket, older, false);
-  assert.equal((await queryById(socket, newer.id)).length, 1, "newer NIP-33 event should remain");
-  assert.equal((await queryById(socket, older.id)).length, 0, "older NIP-33 event should not be stored");
+  await publish(socket1, newer, true);
+  await publish(socket1, older, false);
+  assert.equal((await queryById(socket1, newer.id)).length, 1, "newer NIP-33 event should remain");
+  assert.equal((await queryById(socket1, older.id)).length, 0, "older NIP-33 event should not be stored");
 
   // Empty d-tags must be normalized consistently (NULL and empty string).
   const emptyDNewer = await makeEvent(secret1, 30024, [["d", ""]], "empty d newer", now + 9);
   const emptyDOlder = await makeEvent(secret1, 30024, [["d", ""]], "empty d older", now + 8);
-  await publish(socket, emptyDNewer, true);
-  await publish(socket, emptyDOlder, false);
-  assert.equal((await queryById(socket, emptyDNewer.id)).length, 1, "empty d-tag coordinate should be stored");
-  assert.equal((await queryById(socket, emptyDOlder.id)).length, 0, "empty d-tag coordinate should replace older version");
+  await publish(socket1, emptyDNewer, true);
+  await publish(socket1, emptyDOlder, false);
+  assert.equal((await queryById(socket1, emptyDNewer.id)).length, 1, "empty d-tag coordinate should be stored");
+  assert.equal((await queryById(socket1, emptyDOlder.id)).length, 0, "empty d-tag coordinate should replace older version");
 
-  console.log("Staging write-path tests passed: author ownership, NIP-09 e/a deletion and tombstones, NIP-01 ordering, NIP-33 and empty d-tags.");
+  console.log("Staging write-path tests passed: NIP-42, author ownership, NIP-09 e/a deletion and tombstones, NIP-01 ordering, NIP-33 and empty d-tags.");
 } finally {
-  socket.close();
+  socket1.close();
+  socket2.close();
 }
