@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "esbuild tests/nostr-protocol.test.ts --bundle --platform=node --format=esm --external:node:* --outfile=/tmp/nosflare-protocol.test.mjs && node --test /tmp/nosflare-protocol.test.mjs",
     "deploy:staging": "npm run build && wrangler deploy",
-    "deploy:production": "npm run build && wrangler deploy --config wrangler.production.toml"
+    "deploy:production": "npm run build && wrangler deploy --config wrangler.production.toml",
+    "smoke:staging": "node tests/staging-smoke.mjs"
   },
   "dependencies": {
     "@noble/curves": "^1.6.0"

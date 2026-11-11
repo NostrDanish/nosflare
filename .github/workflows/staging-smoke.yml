@@ -1,0 +1,32 @@
+name: Staging relay smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - v8-staging
+    paths:
+      - "src/relay-worker.ts"
+      - "src/config.ts"
+      - "worker.js"
+      - "tests/staging-smoke.mjs"
+      - ".github/workflows/staging-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test NIP-11 and WebSocket protocol
+        run: npm run smoke:staging
+        env:
+          RELAY_URL: https://nosflare-0xserverless-v8.0xprivacy-online.workers.dev
