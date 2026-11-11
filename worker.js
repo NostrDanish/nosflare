@@ -80,7 +80,7 @@ __export(config_exports, {
 var relayNpub = "npub1c3gyzcvf2xakqy4vy06umu7hgpr97ttyp05yrlvmk8g8xvmse57qj286r6";
 var PAY_TO_RELAY_ENABLED = true;
 var RELAY_ACCESS_PRICE_SATS = 5e3;
-var LNURL_SERVER_PUBKEY = "";
+var LNURL_SERVER_PUBKEY = "beeb48407a6f087ea8f76dc384a5d88c67ced9bd9fb0cdba90930210df3d92e7";
 var PAYEE_LUD16 = "danish@minibits.cash";
 var relayInfo = {
   name: "0xServerless",
