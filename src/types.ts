@@ -48,6 +48,8 @@ export interface RelayInfo {
 
 export interface QueryResult {
   events: NostrEvent[];
+  /** D1 session bookmark used to keep paginated reads consistent. */
+  bookmark?: string | null;
 }
 
 export interface EventToIndex {
@@ -177,6 +179,10 @@ export interface ErrorResponse {
 }
 
 export interface Env {
+  /** D1 database binding declared as RELAY_DATABASE in wrangler.toml. */
+  RELAY_DATABASE: D1Database;
+  /** Durable Object namespace declared as RELAY_WEBSOCKET in wrangler.toml. */
+  RELAY_WEBSOCKET: DurableObjectNamespace;
   CONNECTION_DO: DurableObjectNamespace;
 
   SESSION_MANAGER_DO: DurableObjectNamespace;
@@ -313,6 +319,26 @@ export interface PreSerializedEvent {
 
 export interface ConnectionBroadcastRequest {
   events: PreSerializedEvent[];
+}
+
+/** Live connection state retained for each WebSocket session. */
+export interface WebSocketSession {
+  id: string;
+  webSocket: WebSocket;
+  subscriptions: Map<string, NostrFilter[]>;
+  pubkeyRateLimiter: RateLimiter;
+  reqRateLimiter: RateLimiter;
+  bookmark: string;
+  host: string;
+  challenge?: string;
+  authenticatedPubkeys: Set<string>;
+  hasPaid?: boolean;
+}
+
+/** Internal message used to fan an accepted event out to peer Durable Objects. */
+export interface DOBroadcastRequest {
+  event: NostrEvent;
+  sourceDoId: string;
 }
 
 export interface DurableObject {
