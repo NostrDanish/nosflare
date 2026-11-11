@@ -6,11 +6,7 @@ on:
     branches:
       - v8-staging
     paths:
-      - "src/relay-worker.ts"
-      - "src/config.ts"
-      - "worker.js"
-      - "tests/staging-smoke.mjs"
-      - ".github/workflows/staging-smoke.yml"
+      - "tests/staging-smoke.trigger"
 
 permissions:
   contents: read

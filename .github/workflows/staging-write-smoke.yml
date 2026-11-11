@@ -1,14 +1,11 @@
 name: Staging Nostr write-path tests
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - v8-staging
     paths:
-      - "tests/staging-write-smoke.mjs"
-      - "package.json"
-      - ".github/workflows/staging-write-smoke.yml"
+      - "tests/staging-write-smoke.trigger"
 
 permissions:
   contents: read

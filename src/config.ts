@@ -22,7 +22,7 @@ export const relayInfo: RelayInfo = {
   // NIP-40 (expiration enforcement) and NIP-50 (full-text search) are omitted until implemented.
   supported_nips: [1, 2, 4, 5, 9, 11, 12, 15, 16, 17, 20, 22, 23, 33, 42, 51, 58, 65, 71, 78, 89, 94],
   software: "https://github.com/NostrDanish/nosflare",
-  version: "8.9.27",
+  version: "8.9.28",
   icon: "https://i.postimg.cc/zBBG2Nc9/photo-2026-04-14-04-39-04.jpg",
   banner: "https://i.postimg.cc/cCv6CW7S/photo-2026-04-14-04-38-19.jpg",
 
@@ -35,7 +35,7 @@ export const relayInfo: RelayInfo = {
     max_event_tags: 5000,
     max_content_length: 70000,
     // min_pow_difficulty: 0,
-    auth_required: false, // Set to true to enable NIP-42 authentication
+    auth_required: true, // Preserve production NIP-42 authentication policy
     payment_required: PAY_TO_RELAY_ENABLED,
     restricted_writes: PAY_TO_RELAY_ENABLED,
     created_at_lower_limit: 946684800, // January 1, 2000
