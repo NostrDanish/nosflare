@@ -10,6 +10,14 @@ import { RelayInfo } from './types';
 export const relayNpub = "npub16jdfqgazrkapk0yrqm9rdxlnys7ck39c7zmdzxtxqlmmpxg04r0sd733sv"; // Use your own npub
 export const PAY_TO_RELAY_ENABLED = true; // Set to false to disable pay to relay
 export const RELAY_ACCESS_PRICE_SATS = 212121; // Price in SATS for relay access
+// Zap receipt issuer binding (NIP-57): receipts are only accepted if signed by
+// the LNURL server's nostr signing key. Preferred: set LNURL_SERVER_PUBKEY to
+// that key's hex pubkey directly (no network lookup). Alternatively set
+// PAYEE_LUD16 to the lightning address receiving zaps (e.g. "you@wallet.com")
+// and the key is resolved from https://<domain>/.well-known/lnurlp/<name>
+// (cached for 1 hour; resolution failures reject receipts - fail closed).
+export const LNURL_SERVER_PUBKEY = ""; // Hex pubkey of your LNURL server's nostr key
+export const PAYEE_LUD16 = ""; // Lightning address (name@domain) receiving the zaps
 
 // NIP-42 Authentication
 export const AUTH_REQUIRED = true; // Set to false to disable NIP-42 authentication requirement
