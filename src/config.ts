@@ -16,7 +16,7 @@ export const RELAY_ACCESS_PRICE_SATS = 5000; // Price in SATS for relay access
 // NIP-57 zap-receipt issuer verification. The configured payee's LNURL-pay
 // endpoint advertises allowsNostr=true and its nostrPubkey; the verifier resolves
 // and pins that issuer key at runtime. Missing/invalid endpoint data fails closed.
-export const LNURL_SERVER_PUBKEY = ""; // Hex pubkey that signs this payee's zap receipts
+export const LNURL_SERVER_PUBKEY = "beeb48407a6f087ea8f76dc384a5d88c67ced9bd9fb0cdba90930210df3d92e7"; // Pinned NIP-57 signer key advertised by the verified LNURL endpoint
 export const PAYEE_LUD16 = "danish@minibits.cash"; // 0xPrivacy operator Lightning address; LNURL NIP-57 endpoint verified 2026-11-12
 
 
