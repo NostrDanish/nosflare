@@ -48,3 +48,18 @@ test("rejects malformed, foreign, and non-replaceable address coordinates", () =
   assert.equal(parseAddressableCoordinate(`30023:${author}`, author), null);
   assert.equal(parseAddressableCoordinate(`x:${author}:slug`, author), null);
 });
+
+import { isDatabaseSchemaCurrent } from "../src/db-schema";
+
+test("does not skip migrations when base initialization flag is stale", () => {
+  assert.equal(isDatabaseSchemaCurrent("1", "0"), false);
+  assert.equal(isDatabaseSchemaCurrent("1", null), false);
+  assert.equal(isDatabaseSchemaCurrent("0", "6"), false);
+  assert.equal(isDatabaseSchemaCurrent(undefined, "6"), false);
+});
+
+test("skips migrations only after schema version 6 is recorded", () => {
+  assert.equal(isDatabaseSchemaCurrent("1", "6"), true);
+  assert.equal(isDatabaseSchemaCurrent("1", "7"), true);
+  assert.equal(isDatabaseSchemaCurrent("1", "not-a-version"), false);
+});
