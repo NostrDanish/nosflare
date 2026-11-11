@@ -97,8 +97,16 @@ async function initializeDatabase(db: D1Database): Promise<void> {
       "SELECT value FROM system_config WHERE key = 'db_initialized' LIMIT 1"
     ).first().catch(() => null);
 
-    if (initCheck && initCheck.value === '1') {
-      console.log("Database already initialized");
+    const versionCheck = await dropSession.prepare(
+      "SELECT value FROM system_config WHERE key = 'schema_version' LIMIT 1"
+    ).first().catch(() => null) as { value: string } | null;
+    const storedSchemaVersion = versionCheck ? Number(versionCheck.value) : 0;
+
+    // db_initialized only confirms that base tables were created. Older releases
+    // set this flag before schema migrations completed, so never skip migrations
+    // solely because this flag exists.
+    if (initCheck && initCheck.value === '1' && Number.isFinite(storedSchemaVersion) && storedSchemaVersion >= 6) {
+      console.log("Database schema is up to date");
       return;
     }
   } catch (error) {
