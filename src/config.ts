@@ -107,6 +107,24 @@ export const PAYMENT_DO_SHARDING_ENABLED = true;
 // Rate limit thresholds (sync-friendly)
 export const PUBKEY_RATE_LIMIT = { rate: 600 / 60000, capacity: 600 }; // 600 EVENT messages per min
 export const REQ_RATE_LIMIT = { rate: 300 / 60000, capacity: 300 }; // 300 REQ messages per min
+
+
+// Explicit defaults for optional subsystems.
+// Keep anti-spam and global duplicate checks disabled unless deliberately configured.
+export const enableAntiSpam = false;
+export const enableGlobalDuplicateCheck = false;
+export const antiSpamKinds = new Set<number>();
+
+// Database pruning is deliberately disabled by default. Enabling it can permanently
+// delete relay history; retention policy and protected kinds must be reviewed first.
+export const DB_PRUNING_ENABLED = false;
+export const DB_SIZE_THRESHOLD_GB = 9;
+export const DB_PRUNE_BATCH_SIZE = 1000;
+export const DB_PRUNE_TARGET_GB = 8;
+export const pruneProtectedKinds = new Set<number>([0, 3, 4, 14, 1059, 10002]);
+
+// NIP-42 AUTH event freshness window (milliseconds).
+export const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 export const excludedRateLimitKinds = new Set<number>([
   1059
 ]);
