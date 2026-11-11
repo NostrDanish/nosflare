@@ -2,6 +2,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { Env, NostrEvent, NostrFilter, QueryResult, NostrMessage, Nip05Response } from './types';
 import * as config from './config';
 import { RelayWebSocket } from './durable-object';
+import { isReplaceableKind, isIncomingReplaceableWinner, parseAddressableCoordinate } from './nostr-protocol';
 
 // Import config values
 const {
@@ -652,52 +653,35 @@ async function saveEventToDatabase(event: NostrEvent, env: Env): Promise<{ succe
       return { success: false, message: "duplicate: event already exists", bookmark: session.getBookmark() ?? undefined };
     }
 
-    // NIP-16: Replaceable events (kinds 0, 3, 10000-19999)
-    // Only the latest event (by created_at) for a given (kind, pubkey) should be stored
-    const isReplaceable = event.kind === 0 || event.kind === 3 || (event.kind >= 10000 && event.kind < 20000);
-    if (isReplaceable) {
+    // NIP-01/NIP-16: retain only the winning replaceable event for (kind, pubkey).
+    // For equal timestamps, the lexicographically lower event id wins.
+    if (isReplaceableKind(event.kind)) {
       const existing = await session.prepare(
-        "SELECT id, created_at FROM events WHERE kind = ? AND pubkey = ? LIMIT 1"
-      ).bind(event.kind, event.pubkey).first();
+        "SELECT id, created_at FROM events WHERE kind = ? AND pubkey = ?"
+      ).bind(event.kind, event.pubkey).all();
 
-      if (existing) {
-        if (event.created_at <= (existing.created_at as number)) {
-          return { success: false, message: "duplicate: a newer or equal replaceable event already exists", bookmark: session.getBookmark() ?? undefined };
-        }
-        // Delete the older event and its associated data
-        const oldId = existing.id as string;
-        await session.batch([
-          session.prepare("DELETE FROM tags WHERE event_id = ?").bind(oldId),
-          session.prepare("DELETE FROM content_hashes WHERE event_id = ?").bind(oldId),
-          session.prepare("DELETE FROM event_tags_cache_multi WHERE event_id = ?").bind(oldId),
-          session.prepare("DELETE FROM events WHERE id = ?").bind(oldId),
-        ]);
-        console.log(`Replaced older event ${oldId} with newer event ${event.id} (kind ${event.kind})`);
+      const existingRows = existing.results as Array<{ id: string; created_at: number }>;
+      if (existingRows.some(row => !isIncomingReplaceableWinner(event.created_at, event.id, row.created_at, row.id))) {
+        return { success: false, message: "duplicate: a newer or preferred replaceable event already exists", bookmark: session.getBookmark() ?? undefined };
+      }
+      if (existingRows.length > 0) {
+        await deleteStoredEvents(session, existingRows.map(row => row.id));
       }
     }
 
-    // NIP-33: Parameterized replaceable events (kinds 30000-39999)
-    // Only the latest event for a given (kind, pubkey, d-tag) should be stored
-    const isParameterizedReplaceable = event.kind >= 30000 && event.kind < 40000;
-    if (isParameterizedReplaceable) {
-      const dTag = event.tags.find(t => t[0] === 'd')?.[1] || '';
+    // NIP-33: parameterized replaceable events are keyed by (kind, pubkey, d-tag).
+    if (event.kind >= 30000 && event.kind < 40000) {
+      const dTag = event.tags.find(t => t[0] === 'd')?.[1] ?? '';
       const existing = await session.prepare(
-        "SELECT id, created_at FROM events WHERE kind = ? AND pubkey = ? AND tag_d = ? LIMIT 1"
-      ).bind(event.kind, event.pubkey, dTag).first();
+        "SELECT id, created_at FROM events WHERE kind = ? AND pubkey = ? AND COALESCE(tag_d, '') = ?"
+      ).bind(event.kind, event.pubkey, dTag).all();
 
-      if (existing) {
-        if (event.created_at <= (existing.created_at as number)) {
-          return { success: false, message: "duplicate: a newer or equal parameterized replaceable event already exists", bookmark: session.getBookmark() ?? undefined };
-        }
-        // Delete the older event and its associated data
-        const oldId = existing.id as string;
-        await session.batch([
-          session.prepare("DELETE FROM tags WHERE event_id = ?").bind(oldId),
-          session.prepare("DELETE FROM content_hashes WHERE event_id = ?").bind(oldId),
-          session.prepare("DELETE FROM event_tags_cache_multi WHERE event_id = ?").bind(oldId),
-          session.prepare("DELETE FROM events WHERE id = ?").bind(oldId),
-        ]);
-        console.log(`Replaced older parameterized event ${oldId} with newer event ${event.id} (kind ${event.kind}, d=${dTag})`);
+      const existingRows = existing.results as Array<{ id: string; created_at: number }>;
+      if (existingRows.some(row => !isIncomingReplaceableWinner(event.created_at, event.id, row.created_at, row.id))) {
+        return { success: false, message: "duplicate: a newer or preferred parameterized replaceable event already exists", bookmark: session.getBookmark() ?? undefined };
+      }
+      if (existingRows.length > 0) {
+        await deleteStoredEvents(session, existingRows.map(row => row.id));
       }
     }
 
@@ -740,7 +724,7 @@ async function saveEventToDatabase(event: NostrEvent, env: Env): Promise<{ succe
         if (tag[0] === 'e' && !tagE) tagE = tag[1];
         if (tag[0] === 'a' && !tagA) tagA = tag[1];
         if (tag[0] === 't' && !tagT) tagT = tag[1];
-        if (tag[0] === 'd' && !tagD) tagD = tag[1];
+        if (tag[0] === 'd' && tagD === null) tagD = tag[1] ?? '';
         if (tag[0] === 'r' && !tagR) tagR = tag[1];
         if (tag[0] === 'L' && !tagL) tagL = tag[1];
         if (tag[0] === 's' && !tagS) tagS = tag[1];
@@ -842,89 +826,83 @@ async function saveEventToDatabase(event: NostrEvent, env: Env): Promise<{ succe
   }
 }
 
-// Helper function for kind 5
+// Delete an event and all relay-maintained rows that reference it.
+// D1 batches are capped at 100 statements; four statements are used per event.
+async function deleteStoredEvents(session: D1DatabaseSession, eventIds: string[]): Promise<void> {
+  const uniqueIds = [...new Set(eventIds)];
+  for (let offset = 0; offset < uniqueIds.length; offset += 25) {
+    const statements: D1PreparedStatement[] = [];
+    for (const eventId of uniqueIds.slice(offset, offset + 25)) {
+      statements.push(
+        session.prepare("DELETE FROM tags WHERE event_id = ?").bind(eventId),
+        session.prepare("DELETE FROM content_hashes WHERE event_id = ?").bind(eventId),
+        session.prepare("DELETE FROM event_tags_cache_multi WHERE event_id = ?").bind(eventId),
+        session.prepare("DELETE FROM events WHERE id = ?").bind(eventId),
+      );
+    }
+    await session.batch(statements);
+  }
+}
+
+// NIP-09 kind 5 deletion. Only delete events authored by the deletion event's
+// pubkey, and never delete an event newer than the deletion request.
 async function processDeletionEvent(event: NostrEvent, env: Env): Promise<{ success: boolean; message: string; bookmark?: string }> {
   console.log(`Processing deletion event ${event.id}`);
-  const deletedEventIds = event.tags.filter(tag => tag[0] === "e").map(tag => tag[1]);
-
   const session = env.RELAY_DATABASE.withSession('first-primary');
+  const deletedIds = new Set<string>();
+  const eventIds = [...new Set(event.tags
+    .filter(tag => tag[0] === "e" && typeof tag[1] === "string" && /^[0-9a-f]{64}$/i.test(tag[1]))
+    .map(tag => tag[1].toLowerCase()))];
 
-  if (deletedEventIds.length === 0) {
-    return { success: true, message: "No events to delete", bookmark: session.getBookmark() ?? undefined };
+  // Resolve event-id references in bounded batches, keeping the ownership and
+  // timestamp checks inside SQL so untrusted authors cannot cause cross-user deletion.
+  for (let offset = 0; offset < eventIds.length; offset += 80) {
+    const chunk = eventIds.slice(offset, offset + 80);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await session.prepare(
+      `SELECT id FROM events WHERE pubkey = ? AND created_at <= ? AND id IN (${placeholders})`
+    ).bind(event.pubkey, event.created_at, ...chunk).all();
+    for (const row of result.results) deletedIds.add(row.id as string);
   }
 
-  let deletedCount = 0;
-  const errors: string[] = [];
-  const idsToDelete: string[] = [];
-
-  // Verify ownership for all events in a single query
-  if (deletedEventIds.length > 0) {
-    try {
-      const ownerPlaceholders = deletedEventIds.map(() => '?').join(',');
-      const ownerResult = await session.prepare(
-        `SELECT id, pubkey FROM events WHERE id IN (${ownerPlaceholders})`
-      ).bind(...deletedEventIds).all();
-
-      const eventOwners = new Map<string, string>();
-      for (const row of ownerResult.results) {
-        eventOwners.set(row.id as string, row.pubkey as string);
-      }
-
-      for (const eventId of deletedEventIds) {
-        const ownerPubkey = eventOwners.get(eventId);
-        if (!ownerPubkey) {
-          console.warn(`Event ${eventId} not found in D1. Nothing to delete (may be in queue).`);
-          continue;
-        }
-        if (ownerPubkey !== event.pubkey) {
-          console.warn(`Event ${eventId} does not belong to pubkey ${event.pubkey}. Skipping deletion.`);
-          errors.push(`unauthorized: cannot delete event ${eventId} - wrong pubkey`);
-          continue;
-        }
-        idsToDelete.push(eventId);
-      }
-    } catch (error) {
-      console.error('Error checking event ownership:', error);
-      errors.push('error checking event ownership');
-    }
+  // NIP-09 address references are valid only for replaceable/parameterized
+  // replaceable coordinates belonging to the deletion event's author.
+  const coordinates = new Map<string, { kind: number; dTag: string }>();
+  for (const tag of event.tags) {
+    if (tag[0] !== "a" || typeof tag[1] !== "string") continue;
+    const coordinate = parseAddressableCoordinate(tag[1], event.pubkey);
+    if (coordinate) coordinates.set(`${coordinate.kind}:${coordinate.pubkey}:${coordinate.dTag}`, coordinate);
   }
 
-  // Second pass: batch delete all verified events in one D1 call
+  const coordinateList = [...coordinates.values()];
+  for (let offset = 0; offset < coordinateList.length; offset += 40) {
+    const chunk = coordinateList.slice(offset, offset + 40);
+    if (chunk.length === 0) continue;
+    const predicates = chunk.map(() => "(kind = ? AND COALESCE(tag_d, '') = ?)").join(" OR ");
+    const bindings: Array<string | number> = [event.pubkey, event.created_at];
+    for (const coordinate of chunk) bindings.push(coordinate.kind, coordinate.dTag);
+    const result = await session.prepare(
+      `SELECT id FROM events WHERE pubkey = ? AND created_at <= ? AND (${predicates})`
+    ).bind(...bindings).all();
+    for (const row of result.results) deletedIds.add(row.id as string);
+  }
+
+  const idsToDelete = [...deletedIds];
   if (idsToDelete.length > 0) {
-    try {
-      const deleteStatements: ReturnType<typeof session.prepare>[] = [];
-      for (const eventId of idsToDelete) {
-        deleteStatements.push(
-          session.prepare("DELETE FROM tags WHERE event_id = ?").bind(eventId),
-          session.prepare("DELETE FROM content_hashes WHERE event_id = ?").bind(eventId),
-          session.prepare("DELETE FROM event_tags_cache_multi WHERE event_id = ?").bind(eventId),
-          session.prepare("DELETE FROM events WHERE id = ?").bind(eventId),
-        );
-      }
-
-      // Execute in chunks of 100 (D1 batch limit)
-      for (let i = 0; i < deleteStatements.length; i += 100) {
-        await session.batch(deleteStatements.slice(i, i + 100));
-      }
-
-      deletedCount = idsToDelete.length;
-      console.log(`Batch deleted ${deletedCount} events from D1.`);
-    } catch (error) {
-      console.error('Error batch deleting events:', error);
-      errors.push('error batch deleting events');
-    }
+    await deleteStoredEvents(session, idsToDelete);
+    console.log(`NIP-09 deleted ${idsToDelete.length} event(s) for author ${event.pubkey}`);
   }
 
-  // Save the deletion event itself
+  // A kind-5 event itself is a durable deletion record, including requests
+  // that contain no valid e/a references.
   const saveResult = await saveEventToDatabase(event, env);
-
-  if (errors.length > 0) {
-    return { success: false, message: errors[0], bookmark: saveResult.bookmark ?? (session.getBookmark() ?? undefined) };
+  if (!saveResult.success && !saveResult.message.startsWith("duplicate:")) {
+    return { success: false, message: saveResult.message, bookmark: saveResult.bookmark ?? (session.getBookmark() ?? undefined) };
   }
 
   return {
     success: true,
-    message: deletedCount > 0 ? `Successfully deleted ${deletedCount} event(s)` : "No matching events found to delete",
+    message: idsToDelete.length > 0 ? `Successfully deleted ${idsToDelete.length} event(s)` : "Deletion request recorded; no matching events found",
     bookmark: saveResult.bookmark ?? (session.getBookmark() ?? undefined)
   };
 }
