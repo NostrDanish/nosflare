@@ -1,0 +1,32 @@
+# Explicit production configuration. Deploy only with --config wrangler.production.toml.
+name = "nosflare-0xserverless"
+main = "worker.js"
+compatibility_date = "2025-01-04"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+logpush = true
+
+[[durable_objects.bindings]]
+name = "RELAY_WEBSOCKET"
+class_name = "RelayWebSocket"
+
+[[d1_databases]]
+binding = "RELAY_DATABASE"
+database_name = "nosflare-0xserverless-1776308824596"
+database_id = "393957c2-dd23-4378-ae3c-3e638ee5887a"
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["RelayWebSocket"]
+
+[triggers]
+crons = ["0 0 * * *"]
+
+[limits]
+cpu_ms = 300000
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true

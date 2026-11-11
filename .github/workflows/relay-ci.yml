@@ -30,3 +30,7 @@ jobs:
         run: npm test
       - name: Build Worker bundle
         run: npm run build
+      - name: Validate staging Wrangler configuration
+        run: npx wrangler deploy --dry-run --config wrangler.toml
+      - name: Validate production Wrangler configuration
+        run: npx wrangler deploy --dry-run --config wrangler.production.toml
