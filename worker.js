@@ -3030,11 +3030,10 @@ async function initializeDatabase(db) {
           root_event_id = (
             SELECT tag_value FROM tags
             WHERE event_id = events.id AND tag_name = 'e'
-            AND EXISTS (
-              SELECT 1 FROM tags t2
+            AND (
+              SELECT COUNT(*) FROM tags t2
               WHERE t2.event_id = events.id AND t2.tag_name = 'e'
-              HAVING COUNT(*) > 1
-            )
+            ) > 1
             ORDER BY ROWID DESC LIMIT 1
           ),
           content_preview = SUBSTR(content, 1, 100)
