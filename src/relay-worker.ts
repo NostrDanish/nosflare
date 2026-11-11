@@ -2086,7 +2086,9 @@ function serveLandingPage(): Response {
                 const payer = await window.nostr.getPublicKey();
                 const since = Math.floor(Date.now() / 1000) - 3600;
                 const relays = ['wss://relay.damus.io', 'wss://relay.primal.net', 'wss://sendit.nosflare.com'];
-                const filter = { kinds: [9735], '#P': [payer], since: since, limit: 10 };
+                const operatorPubkey = 'c45041618951bb6012ac23f5cdf3d740465f2d640be841fd9bb1d0733370cd3c';
+                // P is optional on a NIP-57 receipt; query by the mandatory recipient p tag.
+                const filter = { kinds: [9735], '#p': [operatorPubkey], since: since, limit: 30 };
                 let recorded = false;
 
                 const closeAll = () => {
@@ -2095,6 +2097,18 @@ function serveLandingPage(): Response {
 
                 const submitReceipt = async (receipt) => {
                     if (recorded) return;
+                    // Receipt P is optional. Identify the payer from the signed
+                    // kind-9734 request in the mandatory description tag.
+                    const descriptionTag = (receipt.tags || []).find((tag) => tag[0] === 'description' && tag[1]);
+                    let zapRequest;
+                    try {
+                        zapRequest = descriptionTag ? JSON.parse(descriptionTag[1]) : null;
+                    } catch (error) {
+                        return;
+                    }
+                    if (!zapRequest || zapRequest.pubkey !== payer) return;
+                    const receiptPayer = (receipt.tags || []).find((tag) => tag[0] === 'P' && tag[1]);
+                    if (receiptPayer && receiptPayer[1] !== payer) return;
                     try {
                         const response = await originalFetch(window.location.origin + '?notify-zap=true', {
                             method: 'POST',
