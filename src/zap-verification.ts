@@ -24,6 +24,35 @@ export interface VerifiedPayment {
   bolt11: string;     // the paid invoice (audit trail)
 }
 
+// Decode the invoice amount from the BOLT11 HRP into millisatoshis.
+// NIP-57 receipts carry a bolt11 invoice, not an "amount" receipt tag.
+export function bolt11AmountMsats(invoice: string): number | null {
+  try {
+    const normalized = String(invoice ?? "").trim().toLowerCase();
+    const separator = normalized.lastIndexOf("1");
+    if (separator < 3) return null;
+    const hrp = normalized.slice(0, separator);
+    const match = /^ln(?:bcrt|bc|tbs|tb|sb)([0-9]+)?([munp]?)$/.exec(hrp);
+    if (!match || !match[1]) return null;
+    const amount = BigInt(match[1]);
+    let millisatoshis: bigint;
+    switch (match[2]) {
+      case "m": millisatoshis = amount * 100_000_000n; break;
+      case "u": millisatoshis = amount * 100_000n; break;
+      case "n": millisatoshis = amount * 100n; break;
+      case "p":
+        if (amount % 10n !== 0n) return null;
+        millisatoshis = amount / 10n;
+        break;
+      default: millisatoshis = amount * 100_000_000_000n;
+    }
+    if (millisatoshis <= 0n || millisatoshis > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    return Number(millisatoshis);
+  } catch {
+    return null;
+  }
+}
+
 export async function verifyZapReceipt(
   event: NostrEvent,
   operatorNpub: string,
@@ -33,43 +62,65 @@ export async function verifyZapReceipt(
   payeeLud16?: string
 ): Promise<VerifiedPayment | null> {
   try {
-    if (!event || event.kind !== 9735) return null;
+    if (!event || event.kind !== 9735 || !Array.isArray(event.tags)) return null;
 
     const operatorHex = npubToHex(operatorNpub);
-    if (!operatorHex) {
-      console.error("Configured relayNpub is not a valid npub");
+    if (!operatorHex || !Number.isSafeInteger(priceSats) || priceSats <= 0) return null;
+
+    const tagValues = (tags: string[][], name: string) =>
+      tags.filter((item) => item[0] === name).map((item) => item[1] ?? "");
+
+    // NIP-57 kind 9735 requires one recipient tag, one bolt11 invoice and
+    // one JSON-encoded description of the original kind-9734 zap request.
+    const recipients = tagValues(event.tags, "p");
+    const invoices = tagValues(event.tags, "bolt11");
+    const descriptions = tagValues(event.tags, "description");
+    const receiptPayers = tagValues(event.tags, "P");
+    if (recipients.length !== 1 || recipients[0] !== operatorHex) return null;
+    if (invoices.length !== 1 || descriptions.length !== 1 || receiptPayers.length > 1) return null;
+
+    let zapRequest: NostrEvent;
+    try {
+      zapRequest = JSON.parse(descriptions[0]) as NostrEvent;
+    } catch {
       return null;
     }
+    if (!zapRequest || zapRequest.kind !== 9734 || !Array.isArray(zapRequest.tags)) return null;
 
-    const tags = event.tags ?? [];
-    const tag = (name: string) => tags.find((t) => t[0] === name && t[1])?.[1];
+    const requestRecipients = tagValues(zapRequest.tags, "p");
+    if (requestRecipients.length !== 1 || requestRecipients[0] !== operatorHex) return null;
 
-    // Recipient must be the relay operator; sender (P) is the payer.
-    if (tag("p") !== operatorHex) return null;
-    const payer = tag("P");
-    if (!payer || !/^[0-9a-f]{64}$/.test(payer)) return null;
+    // The P tag on a receipt is optional in NIP-57. The signed zap request's
+    // pubkey is the payer; when P is supplied, it must agree with that key.
+    const payer = String(zapRequest.pubkey ?? "").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(payer)) return null;
+    if (receiptPayers.length === 1 && receiptPayers[0]?.toLowerCase() !== payer) return null;
 
-    // Amount (msats) must cover the configured price.
-    const amountTag = tag("amount");
-    if (!amountTag || !/^\d+$/.test(amountTag)) return null;
-    const amountMsats = Number(amountTag);
-    if (!Number.isSafeInteger(priceSats) || priceSats <= 0 ||
-        !Number.isSafeInteger(amountMsats) || amountMsats < priceSats * 1000) return null;
+    const bolt11 = invoices[0];
+    const amountMsats = bolt11AmountMsats(bolt11);
+    if (amountMsats === null || amountMsats < priceSats * 1000) return null;
 
-    // The paid invoice must be attached.
-    const bolt11 = tag("bolt11");
-    if (!bolt11 || !bolt11.toLowerCase().startsWith("ln")) return null;
+    // If the zap request specifies an amount, the invoice amount MUST match it.
+    const requestAmounts = tagValues(zapRequest.tags, "amount");
+    if (requestAmounts.length > 1) return null;
+    if (requestAmounts.length === 1) {
+      const requested = requestAmounts[0];
+      if (!/^\\d+$/.test(requested)) return null;
+      const requestedMsats = Number(requested);
+      if (!Number.isSafeInteger(requestedMsats) || requestedMsats !== amountMsats) return null;
+    }
 
-    // Receipt freshness.
     const now = Math.floor(Date.now() / 1000);
-    if (event.created_at > now + 900 || event.created_at < now - MAX_RECEIPT_AGE_SECONDS) return null;
+    if (!Number.isSafeInteger(event.created_at) ||
+        event.created_at > now + 900 ||
+        event.created_at < now - MAX_RECEIPT_AGE_SECONDS) return null;
+    if (!Number.isSafeInteger(zapRequest.created_at) ||
+        zapRequest.created_at > now + 900 ||
+        zapRequest.created_at < now - 24 * 60 * 60) return null;
 
-    if (!(await verifyEvent(event))) return null;
+    // Both the LNURL provider's receipt and the payer's zap request are signed.
+    if (!await verifyEvent(event) || !await verifyEvent(zapRequest)) return null;
 
-    // Receipt-issuer binding (the NIP-57 check): the receipt must be signed by
-    // the operator's LNURL server's nostr key. A Schnorr-valid receipt signed
-    // by any other key (e.g. a self-signed forgery) is rejected here. Resolved
-    // after signature verification so garbage events can't trigger lookups.
     const issuerKey = await resolveLnurlServerPubkey(lnurlServerPubkey, payeeLud16);
     if (!issuerKey || event.pubkey !== issuerKey) return null;
 
@@ -77,7 +128,7 @@ export async function verifyZapReceipt(
       payer,
       amountSats: Math.floor(amountMsats / 1000),
       receiptId: event.id,
-      bolt11,
+      bolt11
     };
   } catch (error) {
     console.error("Zap receipt verification failed:", error);
