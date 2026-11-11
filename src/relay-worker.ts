@@ -30,6 +30,19 @@ const GLOBAL_MAX_EVENTS = 500;
 const MAX_QUERY_COMPLEXITY = 1000;
 const CHUNK_SIZE = 500;
 
+// Database initialization is shared across concurrent requests in one Worker isolate.
+let databaseInitialization: Promise<void> | null = null;
+
+function ensureDatabaseInitialized(db: D1Database): Promise<void> {
+  if (!databaseInitialization) {
+    databaseInitialization = initializeDatabase(db).catch(error => {
+      databaseInitialization = null;
+      throw error;
+    });
+  }
+  return databaseInitialization;
+}
+
 // Database initialization
 async function initializeDatabase(db: D1Database): Promise<void> {
   const dropSession = db.withSession('first-primary');
@@ -2496,6 +2509,9 @@ export {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     try {
+      // Ensure base tables and pending schema migrations are complete before
+      // serving WebSocket, query, payment, or metadata traffic.
+      await ensureDatabaseInitialized(env.RELAY_DATABASE);
       const url = new URL(request.url);
 
       // Payment endpoints
@@ -2528,11 +2544,6 @@ export default {
         } else if (request.headers.get("Accept") === "application/nostr+json") {
           return handleRelayInfoRequest(request);
         } else {
-          // Initialize database in background
-          ctx.waitUntil(
-            initializeDatabase(env.RELAY_DATABASE)
-              .catch(e => console.error("DB init error:", e))
-          );
           return serveLandingPage();
         }
       } else if (url.pathname === "/.well-known/nostr.json") {
@@ -2553,6 +2564,7 @@ export default {
     console.log('Running scheduled 24hr database maintenance...');
 
     try {
+      await ensureDatabaseInitialized(env.RELAY_DATABASE);
       const session = env.RELAY_DATABASE.withSession('first-primary');
 
       // Check database size and prune if necessary (D1 has a 10GB limit)
